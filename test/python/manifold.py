@@ -575,5 +575,47 @@ class CustomManifoldTests(casadiTestCase):
       ca.Manifold("bad", retract, ca.Function("m", [y, dx], [dx]))
 
 
+class ManifoldSerializationTests(casadiTestCase):
+
+  def manifolds(self):
+    # type: () -> list[ca.Manifold]
+    retract, minus, project = sphere_functions()
+    S2 = ca.Manifold("S2", retract, minus,
+                     {"project": project, "identity": [0, 0, 1],
+                      "euclidean_mask_tangent": [True, False]})
+    return lie_groups() + [S2, ca.Manifold.product([S2, ca.Manifold.SE3(), S2]),
+                           ca.Manifold.product([])]
+
+  def assert_equivalent(self, M, N):
+    # type: (ca.Manifold, ca.Manifold) -> None
+    self.assertEqual(str(M), str(N))
+    self.assertEqual((M.nx(), M.ndx()), (N.nx(), N.ndx()))
+    self.assertEqual(list(M.euclidean_mask()), list(N.euclidean_mask()))
+    self.assertEqual(list(M.euclidean_mask_tangent()), list(N.euclidean_mask_tangent()))
+    self.assertEqual(M.is_lie_group(), N.is_lie_group())
+    self.assertEqual(list(M.offsets()), list(N.offsets()))
+    self.checkarray(M.identity(), N.identity())
+    x = M.project(ca.DM(np.random.randn(M.nx(), 1)))
+    dx = ca.DM(np.random.uniform(-0.5, 0.5, (M.ndx(), 1)))
+    self.checkarray(M.retract(x, dx), N.retract(x, dx))
+    self.checkarray(M.minus(M.retract(x, dx), x), N.minus(M.retract(x, dx), x))
+
+  def test_string(self):
+    np.random.seed(9)
+    for M in self.manifolds():
+      self.assert_equivalent(M, ca.Manifold.deserialize(M.serialize()))
+
+  def test_pickle(self):
+    import pickle
+    np.random.seed(10)
+    for M in self.manifolds():
+      N = pickle.loads(pickle.dumps(M))
+      self.assertTrue(isinstance(N, ca.Manifold))
+      self.assert_equivalent(M, N)
+
+  def test_null(self):
+    self.assertTrue(ca.Manifold.deserialize(ca.Manifold().serialize()).is_null())
+
+
 if __name__ == '__main__':
     unittest.main()

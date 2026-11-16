@@ -27,6 +27,7 @@
 #include "serializing_stream.hpp"
 #include "slice.hpp"
 #include "linsol.hpp"
+#include "manifold_internal.hpp"
 #include "importer.hpp"
 #include "resource_internal.hpp"
 #include "fmu.hpp"
@@ -305,6 +306,16 @@ namespace casadi {
     void DeserializingStream::unpack(Linsol& e) {
       assert_decoration('L');
       shared_unpack<Linsol, LinsolInternal>(e);
+    }
+
+    void SerializingStream::pack(const Manifold& e) {
+      decorate('Y');
+      shared_pack(e);
+    }
+
+    void DeserializingStream::unpack(Manifold& e) {
+      assert_decoration('Y');
+      shared_unpack<Manifold, ManifoldInternal>(e);
     }
 
     void SerializingStream::pack(const GenericType& e) {

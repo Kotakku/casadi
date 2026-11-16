@@ -24,6 +24,7 @@
 
 
 #include "manifold_internal.hpp"
+#include "serializing_stream.hpp"
 
 #include <algorithm>
 
@@ -246,6 +247,38 @@ namespace casadi {
     return f;
   }
 
+  void ManifoldInternal::serialize(SerializingStream& s) const {
+    s.version("Manifold", 1);
+    s.pack("Manifold::type", class_name());
+    serialize_body(s);
+  }
+
+  ManifoldInternal* ManifoldInternal::deserialize(DeserializingStream& s) {
+    s.version("Manifold", 1);
+    std::string type;
+    s.unpack("Manifold::type", type);
+    if (type=="EuclideanManifold") {
+      casadi_int n;
+      s.unpack("EuclideanManifold::n", n);
+      return new EuclideanManifold(n);
+    } else if (type=="SO2Manifold") {
+      return new SO2Manifold();
+    } else if (type=="SO3Manifold") {
+      return new SO3Manifold();
+    } else if (type=="SE2Manifold") {
+      return new SE2Manifold();
+    } else if (type=="SE3Manifold") {
+      return new SE3Manifold();
+    } else if (type=="ProductManifold") {
+      std::vector<Manifold> c;
+      s.unpack("ProductManifold::components", c);
+      return new ProductManifold(c);
+    } else if (type=="CustomManifold") {
+      return CustomManifold::deserialize(s);
+    }
+    casadi_error("Manifold::deserialize: unknown type '" + type + "'.");
+  }
+
   // ---------------------------------------------------------------------------
   // LieGroupInternal
   // ---------------------------------------------------------------------------
@@ -264,6 +297,10 @@ namespace casadi {
 
   EuclideanManifold::EuclideanManifold(casadi_int n)
       : LieGroupInternal("R" + str(n), n, n) {
+  }
+
+  void EuclideanManifold::serialize_body(SerializingStream& s) const {
+    s.pack("EuclideanManifold::n", nx_);
   }
 
   std::string EuclideanManifold::repr() const {
@@ -383,6 +420,42 @@ namespace casadi {
     }
   }
 
+  void CustomManifold::serialize_body(SerializingStream& s) const {
+    s.pack("CustomManifold::name", name_);
+    s.pack("CustomManifold::retract", retract_);
+    s.pack("CustomManifold::minus", minus_);
+    s.pack("CustomManifold::project", project_);
+    s.pack("CustomManifold::constraint", constraint_);
+    s.pack("CustomManifold::identity", identity_);
+    s.pack("CustomManifold::has_identity", has_identity_);
+    s.pack("CustomManifold::euclidean_mask", mask_);
+    s.pack("CustomManifold::euclidean_mask_tangent", mask_tan_);
+  }
+
+  ManifoldInternal* CustomManifold::deserialize(DeserializingStream& s) {
+    std::string name;
+    Function retract, minus, project, constraint;
+    DM identity;
+    bool has_identity;
+    std::vector<bool> mask, mask_tan;
+    s.unpack("CustomManifold::name", name);
+    s.unpack("CustomManifold::retract", retract);
+    s.unpack("CustomManifold::minus", minus);
+    s.unpack("CustomManifold::project", project);
+    s.unpack("CustomManifold::constraint", constraint);
+    s.unpack("CustomManifold::identity", identity);
+    s.unpack("CustomManifold::has_identity", has_identity);
+    s.unpack("CustomManifold::euclidean_mask", mask);
+    s.unpack("CustomManifold::euclidean_mask_tangent", mask_tan);
+    Dict opts = {{"check", false},
+                 {"euclidean_mask", mask},
+                 {"euclidean_mask_tangent", mask_tan}};
+    if (!project.is_null()) opts["project"] = project;
+    if (!constraint.is_null()) opts["constraint"] = constraint;
+    if (has_identity) opts["identity"] = identity.nonzeros();
+    return new CustomManifold(name, retract, minus, opts);
+  }
+
   void CustomManifold::init_custom() {
     if (check_) check();
   }
@@ -469,6 +542,10 @@ namespace casadi {
       off_.push_back(off_.back() + m.nx());
       off_tan_.push_back(off_tan_.back() + m.ndx());
     }
+  }
+
+  void ProductManifold::serialize_body(SerializingStream& s) const {
+    s.pack("ProductManifold::components", comp_);
   }
 
   std::string ProductManifold::repr() const {

@@ -33,6 +33,8 @@ namespace casadi {
 
   // Forward declaration of internal class
   class ManifoldInternal;
+  class SerializingStream;
+  class DeserializingStream;
 
   /** \brief Smooth manifold (optionally a Lie group) with a retraction
 
@@ -326,6 +328,20 @@ namespace casadi {
 
     /// Names accepted by get_function
     static std::vector<std::string> function_names();
+
+    /// Serialize to a string (see deserialize)
+    std::string serialize() const;
+
+    /// Create from a string produced by serialize
+    static Manifold deserialize(const std::string& s);
+
+#ifndef SWIG
+    /// Serialize an object
+    void serialize(SerializingStream& s) const;
+
+    /// Deserialize an object
+    static Manifold deserialize(DeserializingStream& s);
+#endif // SWIG
   };
 
 } // namespace casadi

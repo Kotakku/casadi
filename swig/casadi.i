@@ -6258,6 +6258,21 @@ namespace casadi{
 %include <casadi/core/rootfinder.hpp>
 %include <casadi/core/linsol.hpp>
 %include <casadi/core/manifold.hpp>
+#ifdef SWIGPYTHON
+namespace casadi{
+%extend Manifold {
+  %pythoncode %{
+    def __setstate__(self, state):
+        self.__init__(Manifold.deserialize(state["serialization"]))
+
+    def __getstate__(self):
+        return {"serialization": self.serialize()}
+  %}
+  %stub_method0(__getstate__, %arg(dict[builtins.str, Any]))
+  %stub_method(__setstate__, None, state: Mapping[builtins.str, Any])
+}
+} // namespace casadi
+#endif // SWIGPYTHON
 %include <casadi/core/dple.hpp>
 %include <casadi/core/expm.hpp>
 %include <casadi/core/interpolant.hpp>

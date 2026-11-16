@@ -25,6 +25,9 @@
 
 #include "manifold.hpp"
 #include "manifold_internal.hpp"
+#include "serializing_stream.hpp"
+
+#include <sstream>
 
 namespace casadi {
 
@@ -110,6 +113,32 @@ namespace casadi {
 
   std::vector<std::string> Manifold::function_names() {
     return ManifoldInternal::function_names();
+  }
+
+  void Manifold::serialize(SerializingStream& s) const {
+    s.pack("Manifold::null", is_null());
+    if (!is_null()) (*this)->serialize(s);
+  }
+
+  Manifold Manifold::deserialize(DeserializingStream& s) {
+    bool null;
+    s.unpack("Manifold::null", null);
+    if (null) return Manifold();
+    return create(ManifoldInternal::deserialize(s));
+  }
+
+  std::string Manifold::serialize() const {
+    std::stringstream ss;
+    SerializingStream s(ss);
+    serialize(s);
+    return ss.str();
+  }
+
+  Manifold Manifold::deserialize(const std::string& str) {
+    std::stringstream ss;
+    ss << str;
+    DeserializingStream s(ss);
+    return deserialize(s);
   }
 
   /** Evaluate a manifold Function column-wise

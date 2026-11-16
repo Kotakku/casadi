@@ -120,6 +120,15 @@ namespace casadi {
     /// Initialization after the node is owned by a Manifold
     virtual void init_custom() {}
 
+    /// Serialize (type tag followed by the body)
+    void serialize(SerializingStream& s) const;
+
+    /// Serialize the type-specific data
+    virtual void serialize_body(SerializingStream& s) const {}
+
+    /// Deserialize with type disambiguation
+    static ManifoldInternal* deserialize(DeserializingStream& s);
+
     /// Is fname a Lie group operation?
     static bool is_lie_function(const std::string& fname);
 
@@ -160,6 +169,7 @@ namespace casadi {
   class CASADI_EXPORT EuclideanManifold : public LieGroupInternal {
   public:
     explicit EuclideanManifold(casadi_int n);
+    void serialize_body(SerializingStream& s) const override;
     std::string class_name() const override {return "EuclideanManifold";}
     std::string repr() const override;
     bool is_euclidean() const override {return true;}
@@ -289,6 +299,8 @@ namespace casadi {
     std::vector<bool> euclidean_mask_tangent() const override {return mask_tan_;}
     DM identity() const override {return identity_;}
     void init_custom() override;
+    void serialize_body(SerializingStream& s) const override;
+    static ManifoldInternal* deserialize(DeserializingStream& s);
     SX retract_sx(const SX& x, const SX& dx) const override;
     SX minus_sx(const SX& y, const SX& x) const override;
     SX project_sx(const SX& x) const override;
@@ -306,6 +318,7 @@ namespace casadi {
   class CASADI_EXPORT ProductManifold : public ManifoldInternal {
   public:
     explicit ProductManifold(const std::vector<Manifold>& components);
+    void serialize_body(SerializingStream& s) const override;
     std::string class_name() const override {return "ProductManifold";}
     std::string repr() const override;
     bool is_euclidean() const override;
