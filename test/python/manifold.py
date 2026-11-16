@@ -158,8 +158,12 @@ def lie_groups():
   # type: () -> list[ca.Manifold]
   """Lie groups covered by the generic property tests"""
   return [ca.Manifold.Euclidean(3),
+          ca.Manifold.SO2(),
           ca.Manifold.SO3(),
-          ca.Manifold.product([ca.Manifold.Euclidean(2), ca.Manifold.SO3()])]
+          ca.Manifold.SE2(),
+          ca.Manifold.SE3(),
+          ca.Manifold.product([ca.Manifold.Euclidean(2), ca.Manifold.SO3()]),
+          ca.Manifold.product([ca.Manifold.SE2(), ca.Manifold.SO2(), ca.Manifold.SE3()])]
 
 
 def ad_jacobians(G):
@@ -406,6 +410,66 @@ class SO3Tests(casadiTestCase):
     # Lie operations of a product are available only if all components are groups
     M = ca.Manifold.product([ca.Manifold.SO3(), ca.Manifold.Euclidean(1)])
     self.assertTrue(M.is_lie_group())
+
+
+class SO2SE2SE3Tests(casadiTestCase):
+
+  def test_so2(self):
+    G = ca.Manifold.SO2()
+    self.assertEqual((G.nx(), G.ndx()), (2, 1))
+    self.checkarray(G.identity(), ca.DM([1, 0]))
+    a = G.exp(ca.DM(0.3))
+    self.checkarray(a, ca.DM([np.cos(0.3), np.sin(0.3)]))
+    self.checkarray(G.log(G.compose(a, G.exp(ca.DM(0.5)))), ca.DM(0.8))
+    self.checkarray(G.minus(G.exp(ca.DM(3.0)), G.exp(ca.DM(-3.0))), ca.DM(6.0 - 2*np.pi))
+    self.checkarray(G.act(G.exp(ca.DM(np.pi/2)), ca.DM([1, 0])), ca.DM([0, 1]))
+    self.checkarray(G.project(ca.DM([3, 4])), ca.DM([0.6, 0.8]))
+    self.checkarray(G.constraint(ca.DM([3, 4])), ca.DM(24))
+
+  def test_se2(self):
+    G = ca.Manifold.SE2()
+    self.assertEqual((G.nx(), G.ndx()), (4, 3))
+    self.checkarray(G.identity(), ca.DM([0, 0, 1, 0]))
+    self.assertFalse(any(G.euclidean_mask()))
+    # pure translation
+    self.checkarray(G.exp(ca.DM([1, 2, 0])), ca.DM([1, 2, 1, 0]))
+    # quarter turn about the origin while moving forward: an arc of radius 2/pi
+    a = G.exp(ca.DM([1, 0, np.pi/2]))
+    self.checkarray(a, ca.DM([2/np.pi, 2/np.pi, 0, 1]))
+    # composition = chaining poses
+    b = ca.DM([1, 0, 0, 1])  # at (1, 0), facing +y
+    self.checkarray(G.compose(b, b), ca.DM([1, 1, -1, 0]))
+    self.checkarray(G.act(b, ca.DM([1, 0])), ca.DM([1, 1]))
+    self.checkarray(G.project(ca.DM([5, 6, 3, 4])), ca.DM([5, 6, 0.6, 0.8]))
+
+  def test_se3(self):
+    G = ca.Manifold.SE3()
+    self.assertEqual((G.nx(), G.ndx()), (7, 6))
+    self.checkarray(G.identity(), ca.DM([0, 0, 0, 1, 0, 0, 0]))
+    self.assertFalse(any(G.euclidean_mask()))
+    # pure translation
+    self.checkarray(G.exp(ca.DM([1, 2, 3, 0, 0, 0])), ca.DM([1, 2, 3, 1, 0, 0, 0]))
+    # screw motion: rotation about z with translation along z is decoupled
+    a = G.exp(ca.DM([0, 0, 2, 0, 0, np.pi/2]))
+    self.checkarray(a, ca.DM([0, 0, 2, np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)]))
+    self.checkarray(G.act(a, ca.DM([1, 0, 0])), ca.DM([0, 1, 2]))
+    # SE3 couples translation and rotation, unlike R3 x SO3
+    P = ca.Manifold.product([ca.Manifold.Euclidean(3), ca.Manifold.SO3()])
+    x = G.exp(ca.DM([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]))
+    dx = ca.DM([1, 0, 0, 0, 0, 0])
+    q = x[3:]
+    self.checkarray(G.retract(x, dx)[:3], x[:3] + ca.mtimes(ca.Manifold.SO3().as_matrix(q), dx[:3]))
+    self.checkarray(P.retract(x, dx)[:3], x[:3] + dx[:3])
+    self.checkarray(G.project(ca.DM([1, 2, 3, 2, 0, 0, 0])), ca.DM([1, 2, 3, 1, 0, 0, 0]))
+
+  def test_product_point_dim(self):
+    M = ca.Manifold.product([ca.Manifold.SE2(), ca.Manifold.SO3()])
+    f = M.get_function("act")
+    self.assertEqual(f.size1_in(1), 5)
+    a = M.exp(ca.DM([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]))
+    p = ca.DM([1, 2, 3, 4, 5])
+    self.checkarray(M.act(a, p), ca.vertcat(M.component(0).act(a[:4], p[:2]),
+                                            M.component(1).act(a[4:], p[2:])))
 
 
 if __name__ == '__main__':

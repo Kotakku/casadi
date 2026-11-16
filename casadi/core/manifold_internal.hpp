@@ -207,6 +207,74 @@ namespace casadi {
     SX Jl_inv_sx(const SX& v) const override;
   };
 
+  /** \brief SO(2) as unit complex numbers [cos(theta), sin(theta)] */
+  class CASADI_EXPORT SO2Manifold : public LieGroupInternal {
+  public:
+    SO2Manifold();
+    std::string class_name() const override {return "SO2Manifold";}
+    std::string repr() const override {return "SO2";}
+    DM identity() const override;
+    casadi_int point_dim() const override {return 2;}
+    casadi_int matrix_dim() const override {return 2;}
+    SX project_sx(const SX& x) const override;
+    SX constraint_sx(const SX& x) const override;
+    SX compose_sx(const SX& a, const SX& b) const override;
+    SX inverse_sx(const SX& a) const override;
+    SX exp_sx(const SX& v) const override;
+    SX log_sx(const SX& a) const override;
+    SX act_sx(const SX& a, const SX& p) const override;
+    SX hat_sx(const SX& v) const override;
+    SX vee_sx(const SX& V) const override;
+    SX as_matrix_sx(const SX& a) const override;
+    SX Adj_sx(const SX& a) const override;
+    SX Jr_sx(const SX& v) const override;
+    SX Jl_sx(const SX& v) const override;
+    SX Jr_inv_sx(const SX& v) const override;
+    SX Jl_inv_sx(const SX& v) const override;
+  };
+
+  /** \brief SE(2) as [x, y, cos(theta), sin(theta)], tangent [rho_x, rho_y, theta] */
+  class CASADI_EXPORT SE2Manifold : public LieGroupInternal {
+  public:
+    SE2Manifold();
+    std::string class_name() const override {return "SE2Manifold";}
+    std::string repr() const override {return "SE2";}
+    DM identity() const override;
+    casadi_int point_dim() const override {return 2;}
+    casadi_int matrix_dim() const override {return 3;}
+    SX project_sx(const SX& x) const override;
+    SX constraint_sx(const SX& x) const override;
+    SX compose_sx(const SX& a, const SX& b) const override;
+    SX inverse_sx(const SX& a) const override;
+    SX exp_sx(const SX& v) const override;
+    SX log_sx(const SX& a) const override;
+    SX act_sx(const SX& a, const SX& p) const override;
+    SX hat_sx(const SX& v) const override;
+    SX vee_sx(const SX& V) const override;
+    SX as_matrix_sx(const SX& a) const override;
+  };
+
+  /** \brief SE(3) as [p (3); q (4, quaternion [w, x, y, z])], tangent [rho (3); theta (3)] */
+  class CASADI_EXPORT SE3Manifold : public LieGroupInternal {
+  public:
+    SE3Manifold();
+    std::string class_name() const override {return "SE3Manifold";}
+    std::string repr() const override {return "SE3";}
+    DM identity() const override;
+    casadi_int point_dim() const override {return 3;}
+    casadi_int matrix_dim() const override {return 4;}
+    SX project_sx(const SX& x) const override;
+    SX constraint_sx(const SX& x) const override;
+    SX compose_sx(const SX& a, const SX& b) const override;
+    SX inverse_sx(const SX& a) const override;
+    SX exp_sx(const SX& v) const override;
+    SX log_sx(const SX& a) const override;
+    SX act_sx(const SX& a, const SX& p) const override;
+    SX hat_sx(const SX& v) const override;
+    SX vee_sx(const SX& V) const override;
+    SX as_matrix_sx(const SX& a) const override;
+  };
+
   /** \brief Cartesian product of manifolds */
   class CASADI_EXPORT ProductManifold : public ManifoldInternal {
   public:

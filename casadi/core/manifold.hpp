@@ -107,6 +107,29 @@ namespace casadi {
         nx = 4, ndx = 3. Note that Eigen and scipy store [x, y, z, w].
     */
     static Manifold SO3();
+
+    /** \brief Rotation group SO(2) as unit complex numbers
+
+        Ambient representation [cos(theta), sin(theta)], nx = 2, ndx = 1.
+    */
+    static Manifold SO2();
+
+    /** \brief Rigid motions in the plane SE(2)
+
+        Ambient representation [x, y, cos(theta), sin(theta)], nx = 4.
+        Tangent [rho_x, rho_y, theta], ndx = 3 (translation first).
+    */
+    static Manifold SE2();
+
+    /** \brief Rigid motions in space SE(3)
+
+        Ambient representation [p (3); q (4)] with q a unit quaternion
+        [w, x, y, z], nx = 7. Tangent [rho (3); theta (3)], ndx = 6
+        (translation first). This is the true group SE(3), in which
+        translation and rotation are coupled by retract; for independent
+        perturbations use product([Euclidean(3), SO3()]).
+    */
+    static Manifold SE3();
     ///@}
 
     /// \name Information

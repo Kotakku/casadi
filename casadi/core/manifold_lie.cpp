@@ -172,4 +172,183 @@ namespace casadi {
   SX SO3Manifold::Jr_inv_sx(const SX& v) const { return so3_Jl_inv(-v);}
   SX SO3Manifold::Jl_inv_sx(const SX& v) const { return so3_Jl_inv(v);}
 
+
+  // ---------------------------------------------------------------------------
+  // SO2Manifold
+  // ---------------------------------------------------------------------------
+
+  namespace {
+    // complex multiplication of [c, s] pairs
+    SX so2_mul(const SX& a, const SX& b) {
+      return vertcat(a(0)*b(0) - a(1)*b(1), a(1)*b(0) + a(0)*b(1));
+    }
+    SX so2_rot(const SX& a) {
+      SX R = SX::zeros(2, 2);
+      R(0, 0) = a(0); R(0, 1) = -a(1);
+      R(1, 0) = a(1); R(1, 1) = a(0);
+      return R;
+    }
+    SX so2_hat(const SX& th) {
+      SX r = SX::zeros(2, 2);
+      r(0, 1) = -th; r(1, 0) = th;
+      return r;
+    }
+    SX unit_rows(const SX& x, casadi_int i0) {
+      SX r = x;
+      SX c = x(Slice(i0, x.size1()));
+      r(Slice(i0, x.size1())) = c/norm_2(c);
+      return r;
+    }
+  } // namespace
+
+  SO2Manifold::SO2Manifold() : LieGroupInternal("SO2", 2, 1) {
+  }
+
+  DM SO2Manifold::identity() const {
+    return DM(std::vector<double>{1, 0});
+  }
+
+  SX SO2Manifold::project_sx(const SX& x) const { return x/norm_2(x);}
+  SX SO2Manifold::constraint_sx(const SX& x) const { return dot(x, x) - 1;}
+  SX SO2Manifold::compose_sx(const SX& a, const SX& b) const { return so2_mul(a, b);}
+  SX SO2Manifold::inverse_sx(const SX& a) const { return vertcat(a(0), -a(1));}
+  SX SO2Manifold::exp_sx(const SX& v) const { return vertcat(cos(v), sin(v));}
+  SX SO2Manifold::log_sx(const SX& a) const { return atan2(a(1), a(0));}
+  SX SO2Manifold::act_sx(const SX& a, const SX& p) const { return mtimes(so2_rot(a), p);}
+  SX SO2Manifold::hat_sx(const SX& v) const { return so2_hat(v);}
+  SX SO2Manifold::vee_sx(const SX& V) const { return V(1, 0);}
+  SX SO2Manifold::as_matrix_sx(const SX& a) const { return so2_rot(a);}
+  SX SO2Manifold::Adj_sx(const SX& a) const { return SX(1);}
+  SX SO2Manifold::Jr_sx(const SX& v) const { return SX(1);}
+  SX SO2Manifold::Jl_sx(const SX& v) const { return SX(1);}
+  SX SO2Manifold::Jr_inv_sx(const SX& v) const { return SX(1);}
+  SX SO2Manifold::Jl_inv_sx(const SX& v) const { return SX(1);}
+
+  // ---------------------------------------------------------------------------
+  // SE2Manifold: [x, y, c, s], tangent [rho_x, rho_y, theta]
+  // ---------------------------------------------------------------------------
+
+  SE2Manifold::SE2Manifold() : LieGroupInternal("SE2", 4, 3) {
+  }
+
+  DM SE2Manifold::identity() const {
+    return DM(std::vector<double>{0, 0, 1, 0});
+  }
+
+  SX SE2Manifold::project_sx(const SX& x) const { return unit_rows(x, 2);}
+
+  SX SE2Manifold::constraint_sx(const SX& x) const {
+    SX r = x(Slice(2, 4));
+    return dot(r, r) - 1;
+  }
+
+  SX SE2Manifold::compose_sx(const SX& a, const SX& b) const {
+    SX ra = a(Slice(2, 4)), rb = b(Slice(2, 4));
+    return vertcat(a(Slice(0, 2)) + mtimes(so2_rot(ra), b(Slice(0, 2))), so2_mul(ra, rb));
+  }
+
+  SX SE2Manifold::inverse_sx(const SX& a) const {
+    SX c = a(2), s = a(3), x = a(0), y = a(1);
+    return vertcat(std::vector<SX>{-(c*x + s*y), s*x - c*y, c, -s});
+  }
+
+  SX SE2Manifold::exp_sx(const SX& v) const {
+    SX th = v(2), t2 = th*th;
+    // V(theta) = [A -B; B A], A = sin(th)/th, B = (1-cos(th))/th
+    SX A = sinc(t2), B = th*cosc(t2);
+    return vertcat(std::vector<SX>{A*v(0) - B*v(1), B*v(0) + A*v(1), cos(th), sin(th)});
+  }
+
+  SX SE2Manifold::log_sx(const SX& a) const {
+    SX th = atan2(a(3), a(2)), t2 = th*th;
+    SX A = sinc(t2), B = th*cosc(t2);
+    // V^-1 = [A B; -B A]/(A^2 + B^2)
+    SX d = A*A + B*B;
+    return vertcat(std::vector<SX>{(A*a(0) + B*a(1))/d, (-B*a(0) + A*a(1))/d, th});
+  }
+
+  SX SE2Manifold::act_sx(const SX& a, const SX& p) const {
+    return mtimes(so2_rot(a(Slice(2, 4))), p) + a(Slice(0, 2));
+  }
+
+  SX SE2Manifold::hat_sx(const SX& v) const {
+    SX r = SX::zeros(3, 3);
+    r(Slice(0, 2), Slice(0, 2)) = so2_hat(v(2));
+    r(Slice(0, 2), 2) = v(Slice(0, 2));
+    return r;
+  }
+
+  SX SE2Manifold::vee_sx(const SX& V) const {
+    return vertcat(V(0, 2), V(1, 2), V(1, 0));
+  }
+
+  SX SE2Manifold::as_matrix_sx(const SX& a) const {
+    SX r = SX::eye(3);
+    r(Slice(0, 2), Slice(0, 2)) = so2_rot(a(Slice(2, 4)));
+    r(Slice(0, 2), 2) = a(Slice(0, 2));
+    return r;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SE3Manifold: [p (3); q (4)], tangent [rho (3); theta (3)]
+  // ---------------------------------------------------------------------------
+
+  SE3Manifold::SE3Manifold() : LieGroupInternal("SE3", 7, 6) {
+  }
+
+  DM SE3Manifold::identity() const {
+    return DM(std::vector<double>{0, 0, 0, 1, 0, 0, 0});
+  }
+
+  SX SE3Manifold::project_sx(const SX& x) const { return unit_rows(x, 3);}
+
+  SX SE3Manifold::constraint_sx(const SX& x) const {
+    SX q = x(Slice(3, 7));
+    return dot(q, q) - 1;
+  }
+
+  SX SE3Manifold::compose_sx(const SX& a, const SX& b) const {
+    SX qa = a(Slice(3, 7));
+    return vertcat(a(Slice(0, 3)) + mtimes(quat_to_rot(qa), b(Slice(0, 3))),
+                   quat_mul(qa, b(Slice(3, 7))));
+  }
+
+  SX SE3Manifold::inverse_sx(const SX& a) const {
+    SX qi = quat_conj(a(Slice(3, 7)));
+    return vertcat(-mtimes(quat_to_rot(qi), a(Slice(0, 3))), qi);
+  }
+
+  SX SE3Manifold::exp_sx(const SX& v) const {
+    SX th = v(Slice(3, 6));
+    // translation: V(theta) rho with V = J_l of SO(3)
+    return vertcat(mtimes(so3_Jl(th), v(Slice(0, 3))), so3_exp(th));
+  }
+
+  SX SE3Manifold::log_sx(const SX& a) const {
+    SX th = so3_log(a(Slice(3, 7)));
+    return vertcat(mtimes(so3_Jl_inv(th), a(Slice(0, 3))), th);
+  }
+
+  SX SE3Manifold::act_sx(const SX& a, const SX& p) const {
+    return mtimes(quat_to_rot(a(Slice(3, 7))), p) + a(Slice(0, 3));
+  }
+
+  SX SE3Manifold::hat_sx(const SX& v) const {
+    SX r = SX::zeros(4, 4);
+    r(Slice(0, 3), Slice(0, 3)) = manifold_skew(v(Slice(3, 6)));
+    r(Slice(0, 3), 3) = v(Slice(0, 3));
+    return r;
+  }
+
+  SX SE3Manifold::vee_sx(const SX& V) const {
+    return vertcat(std::vector<SX>{V(0, 3), V(1, 3), V(2, 3), V(2, 1), V(0, 2), V(1, 0)});
+  }
+
+  SX SE3Manifold::as_matrix_sx(const SX& a) const {
+    SX r = SX::eye(4);
+    r(Slice(0, 3), Slice(0, 3)) = quat_to_rot(a(Slice(3, 7)));
+    r(Slice(0, 3), 3) = a(Slice(0, 3));
+    return r;
+  }
+
 } // namespace casadi

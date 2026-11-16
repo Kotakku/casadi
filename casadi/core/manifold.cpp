@@ -61,6 +61,18 @@ namespace casadi {
     return create(new SO3Manifold());
   }
 
+  Manifold Manifold::SO2() {
+    return create(new SO2Manifold());
+  }
+
+  Manifold Manifold::SE2() {
+    return create(new SE2Manifold());
+  }
+
+  Manifold Manifold::SE3() {
+    return create(new SE3Manifold());
+  }
+
   Manifold Manifold::product(const std::vector<Manifold>& components) {
     return create(new ProductManifold(components));
   }
