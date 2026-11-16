@@ -77,6 +77,7 @@ set(CASADI_PUBLIC
   callback.hpp
   external.hpp
   linsol.hpp
+  manifold.hpp
   rootfinder.hpp
   integrator.hpp
   nlpsol.hpp
@@ -208,6 +209,7 @@ set(CASADI_INTERNAL
   fmu_function.hpp        fmu_function.cpp
   jit_function.hpp        jit_function.cpp
   linsol.cpp              linsol_internal.hpp  linsol_internal.cpp
+  manifold.cpp            manifold_internal.hpp  manifold_internal.cpp
   rootfinder_impl.hpp     rootfinder.cpp
   integrator_impl.hpp     integrator.cpp
   runtime_integrator.hpp  runtime_integrator.cpp
