@@ -101,10 +101,12 @@ namespace casadi {
         "OCP horizon"}},
       {"nx",
        {OT_INTVECTOR,
-        "Number of states, length N+1"}},
+        "Number of states, length N+1. With option x_manifold, these are entries of the "
+        "primal vector x (e.g. 4 for a quaternion); fatrop itself works with the tangent "
+        "dimensions, which are reported in the stats."}},
       {"nu",
        {OT_INTVECTOR,
-        "Number of controls, length N+1"}},
+        "Number of controls, length N+1 (entries of the primal vector x, see nx)"}},
       {"ng",
        {OT_INTVECTOR,
         "Number of non-dynamic constraints, length N+1"}},
@@ -113,7 +115,9 @@ namespace casadi {
         "Options to be passed to fatrop"}},
       {"structure_detection",
        {OT_STRING,
-        "NONE | auto | manual"}},
+        "NONE | auto | manual. With option x_manifold, write the dynamics of a manifold "
+        "element in its tangent space, e.g. M.minus(x_{k+1}, F(x_k, u_k)) == 0; the dense "
+        "dependence on the tangent of x_{k+1} is normalized to the identity internally."}},
       {"convexify_strategy",
        {OT_STRING,
         "NONE|regularize|eigen-reflect|eigen-clip. "
@@ -193,6 +197,21 @@ namespace casadi {
       exact_hessian_ = hessian_approximation->second == "exact";
     }
 
+    // Optimization on a manifold: fatrop works in the tangent space (dimension nt)
+    manifold_ = !x_manifold_.is_null();
+    casadi_int nt = manifold_ ? x_manifold_.ndx() : nx_;
+    if (manifold_) {
+      std::vector<casadi_int> tan_idx = range(nt);
+      Function local = manifold_local_oracle(nt, tan_idx, {});
+      manifold_create_function(local, "nlp_grad_f", {"x", "p"}, {"grad:f:d"});
+      manifold_create_function(local, "nlp_jac_g", {"x", "p"}, {"g", "jac:g:d"});
+      if (exact_hessian_) {
+        manifold_create_function(local, "nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
+                                 {"grad:gamma:d", "hess:gamma:d:d"}, {{"gamma", {"f", "g"}}});
+      }
+      manifold_create_step(nt, tan_idx);
+    }
+
     // Setup NLP functions
     create_function("nlp_f", {"x", "p"}, {"f"});
     create_function("nlp_g", {"x", "p"}, {"g"});
@@ -248,10 +267,11 @@ namespace casadi {
     if (structure_detection_==STRUCTURE_MANUAL) {
       casadi_assert(struct_cnt==4,
         "You must set all of N, nx, nu, ng.");
+      if (manifold_) manifold_tangent_structure();
     } else if (structure_detection_==STRUCTURE_NONE) {
       N_ = 0;
       nxs_ = {0};
-      nus_ = {nx_};
+      nus_ = {nt};
       ngs_ = {ng_};
     } else if (structure_detection_==STRUCTURE_AUTO) {
       casadi_assert(!equality_.empty(),
@@ -262,7 +282,9 @@ namespace casadi {
       // Find the right-most column for each row in A -> A_skyline
       // Find the second-to-right-most column -> A_skyline2
       // Find the left-most column -> A_bottomline
-      Sparsity AT = A_.T();
+      // On a manifold, the dynamics rows of a non-Euclidean element depend densely on the
+      // tangent of x_{k+1}; make that block diagonal for the detection only
+      Sparsity AT = (manifold_ ? manifold_detection_sparsity(A_) : A_).T();
       std::vector<casadi_int> A_skyline;
       std::vector<casadi_int> A_skyline2;
       std::vector<casadi_int> A_bottomline;
@@ -387,7 +409,7 @@ namespace casadi {
 
       // Patch loose ends
       nus_.front() += std::max(A_skyline[0]-nxs_.front(), static_cast<casadi_int>(0));
-      nus_.back() += nx_-sum(nu)-sum(nx);
+      nus_.back() += nt-sum(nu)-sum(nx);
 
       casadi_assert_dev(nxs_.back()==0);
       nxs_.pop_back();
@@ -396,7 +418,7 @@ namespace casadi {
       casadi_assert_dev(nx.size()==ng.size());
 
       casadi_assert_dev(sum(ng)+sum(nx)==na_+nx.front());
-      casadi_assert_dev(sum(nx)+sum(nu)==nx_);
+      casadi_assert_dev(sum(nx)+sum(nu)==nt);
 
       N_ = nxs_.size()-1;
     }
@@ -456,18 +478,19 @@ namespace casadi {
       CD_offsets_.push_back(offset);
     }
 
-    ABsp_ = blocksparsity(na_, nx_, AB_blocks_);
-    CDsp_ = blocksparsity(na_, nx_, CD_blocks_);
-    Isp_ = blocksparsity(na_, nx_, I_blocks_, true);
+    ABsp_ = blocksparsity(na_, nt, AB_blocks_);
+    CDsp_ = blocksparsity(na_, nt, CD_blocks_);
+    // On a manifold, the blocks of x_{k+1} are dense; they are normalized to the identity
+    Isp_ = blocksparsity(na_, nt, I_blocks_, !manifold_);
 
     Sparsity total = ABsp_ + CDsp_ + Isp_;
 
     if (debug_) {
       total.to_file("debug_fatrop_expected.mtx");
-      blocksparsity(na_, nx_, A_blocks).to_file("debug_fatrop_A.mtx");
-      blocksparsity(na_, nx_, B_blocks).to_file("debug_fatrop_B.mtx");
-      blocksparsity(na_, nx_, C_blocks).to_file("debug_fatrop_C.mtx");
-      blocksparsity(na_, nx_, D_blocks).to_file("debug_fatrop_D.mtx");
+      blocksparsity(na_, nt, A_blocks).to_file("debug_fatrop_A.mtx");
+      blocksparsity(na_, nt, B_blocks).to_file("debug_fatrop_B.mtx");
+      blocksparsity(na_, nt, C_blocks).to_file("debug_fatrop_C.mtx");
+      blocksparsity(na_, nt, D_blocks).to_file("debug_fatrop_D.mtx");
       Isp_.to_file("debug_fatrop_I.mtx");
       std::vector<casadi_int> errors_vec(errors.begin(), errors.end());
       std::vector<casadi_int> colind = {0, static_cast<casadi_int>(errors_vec.size())};
@@ -498,7 +521,7 @@ namespace casadi {
       RSQ_blocks_.push_back({offset, offset,       nx[k]+nu[k], nx[k]+nu[k]});
       offset+= nx[k]+nu[k];
     }
-    RSQsp_ = blocksparsity(nx_, nx_, RSQ_blocks_);
+    RSQsp_ = blocksparsity(nt, nt, RSQ_blocks_);
 
     offset = 0;
     RSQ_offsets_.push_back(0);
@@ -506,6 +529,9 @@ namespace casadi {
       offset += e.rows*e.cols;
       RSQ_offsets_.push_back(offset);
     }
+
+    // Stages of the primal vector and mapping of Euclidean entries to tangent indices
+    init_ambient_structure();
 
     set_fatrop_prob();
 
@@ -517,6 +543,149 @@ namespace casadi {
     alloc_res(sz_res, true);
     alloc_iw(sz_iw, true);
     alloc_w(sz_w, true);
+  }
+
+  // Tangent offset -> ambient offset of a stage boundary; -1 if it splits a manifold element
+  static casadi_int fatrop_tan2amb(const std::vector<Nlpsol::ManifoldLeaf>& leaves,
+                                   casadi_int t, casadi_int nx) {
+    for (auto&& L : leaves) {
+      casadi_int t0 = L.offset_tangent, t1 = t0 + L.m.ndx();
+      if (t==t0) return L.offset;
+      if (t>t0 && t<t1) return L.m.is_euclidean() ? L.offset + (t-t0) : -1;
+    }
+    return nx;
+  }
+
+  // Ambient offset -> tangent offset of a stage boundary; -1 if it splits a manifold element
+  static casadi_int fatrop_amb2tan(const std::vector<Nlpsol::ManifoldLeaf>& leaves,
+                                   casadi_int a, casadi_int nt) {
+    for (auto&& L : leaves) {
+      casadi_int a0 = L.offset, a1 = a0 + L.m.nx();
+      if (a==a0) return L.offset_tangent;
+      if (a>a0 && a<a1) return L.m.is_euclidean() ? L.offset_tangent + (a-a0) : -1;
+    }
+    return nt;
+  }
+
+  void FatropInterface::manifold_tangent_structure() {
+    // The manual structure (nx, nu) refers to the primal vector x; convert to the tangent
+    std::vector<Nlpsol::ManifoldLeaf> leaves = manifold_leaves();
+    casadi_int nt = x_manifold_.ndx();
+    casadi_assert(nxs_.size()==N_+1 && nus_.size()==N_+1,
+      "nx and nu must have length N+1.");
+    std::vector<casadi_int> nx_t, nu_t;
+    casadi_int a = 0;
+    for (casadi_int k=0; k<=N_; ++k) {
+      casadi_int t0 = fatrop_amb2tan(leaves, a, nt);
+      casadi_int t1 = fatrop_amb2tan(leaves, a + nxs_[k], nt);
+      casadi_int t2 = fatrop_amb2tan(leaves, a + nxs_[k] + nus_[k], nt);
+      casadi_assert(t0>=0 && t1>=0 && t2>=0,
+        "Fatrop: the structure (nx, nu) splits an element of the manifold " + str(x_manifold_)
+        + " at stage " + str(k) + ".");
+      nx_t.push_back(t1-t0);
+      nu_t.push_back(t2-t1);
+      a += nxs_[k] + nus_[k];
+    }
+    nxs_ = nx_t;
+    nus_ = nu_t;
+  }
+
+  Sparsity FatropInterface::manifold_detection_sparsity(const Sparsity& A) const {
+    // Rows whose rightmost entry lies in a non-Euclidean element and that come in groups of
+    // ndx consecutive rows (the dynamics of that element) get a diagonal pattern on it
+    std::vector<Nlpsol::ManifoldLeaf> leaves = manifold_leaves();
+    Sparsity AT = A.T();
+    std::vector<casadi_int> colind = AT.get_colind(), row = AT.get_row();
+    casadi_int nr = A.size1();
+    // Rightmost column of each row
+    std::vector<casadi_int> last(nr, -1);
+    for (casadi_int i=0; i<nr; ++i) {
+      if (colind[i+1]>colind[i]) last[i] = row[colind[i+1]-1];
+    }
+    std::vector<std::vector<casadi_int> > cols(nr);
+    for (casadi_int i=0; i<nr; ++i) {
+      cols[i].assign(row.begin()+colind[i], row.begin()+colind[i+1]);
+    }
+    for (casadi_int i=0; i<nr; ) {
+      const Nlpsol::ManifoldLeaf* leaf = nullptr;
+      for (auto&& L : leaves) {
+        if (!L.m.is_euclidean() && last[i]>=L.offset_tangent
+            && last[i]<L.offset_tangent+L.m.ndx()) leaf = &L;
+      }
+      if (leaf==nullptr) {
+        i++;
+        continue;
+      }
+      casadi_int t0 = leaf->offset_tangent, m = leaf->m.ndx();
+      bool group = i+m<=nr;
+      for (casadi_int j=0; j<m && group; ++j) {
+        group = (equality_.empty() || equality_[i+j]) && last[i+j]>=t0 && last[i+j]<t0+m;
+      }
+      if (!group) {
+        i++;
+        continue;
+      }
+      for (casadi_int j=0; j<m; ++j) {
+        std::vector<casadi_int> c;
+        for (casadi_int e : cols[i+j]) if (e<t0) c.push_back(e);
+        c.push_back(t0+j);
+        cols[i+j] = c;
+      }
+      i += m;
+    }
+    std::vector<casadi_int> r, c;
+    for (casadi_int i=0; i<nr; ++i) {
+      for (casadi_int e : cols[i]) {
+        r.push_back(i);
+        c.push_back(e);
+      }
+    }
+    return Sparsity::triplet(nr, A.size2(), r, c);
+  }
+
+  void FatropInterface::init_ambient_structure() {
+    casadi_int nt = manifold_ ? x_manifold_.ndx() : nx_;
+    nxs_amb_.clear();
+    nus_amb_.clear();
+    amb_offs_.clear();
+    amb2tan_ = range(nx_);
+    if (!manifold_) {
+      nxs_amb_ = nxs_;
+      nus_amb_ = nus_;
+      casadi_int a = 0;
+      for (casadi_int k=0; k<=N_; ++k) {
+        amb_offs_.push_back(a);
+        a += nxs_[k] + nus_[k];
+      }
+      amb_offs_.push_back(a);
+    } else {
+      std::vector<Nlpsol::ManifoldLeaf> leaves = manifold_leaves();
+      casadi_int t = 0;
+      for (casadi_int k=0; k<=N_; ++k) {
+        casadi_int a0 = fatrop_tan2amb(leaves, t, nx_);
+        casadi_int a1 = fatrop_tan2amb(leaves, t + nxs_[k], nx_);
+        casadi_int a2 = fatrop_tan2amb(leaves, t + nxs_[k] + nus_[k], nx_);
+        casadi_assert(a0>=0 && a1>=0 && a2>=0,
+          "Fatrop: the detected stage structure splits an element of the manifold "
+          + str(x_manifold_) + " at stage " + str(k) + ". Structure (tangent dimensions): "
+          "nx " + str(nxs_) + ", nu " + str(nus_) + ".");
+        amb_offs_.push_back(a0);
+        nxs_amb_.push_back(a1-a0);
+        nus_amb_.push_back(a2-a1);
+        t += nxs_[k] + nus_[k];
+      }
+      amb_offs_.push_back(nx_);
+      // Simple bounds are only allowed on Euclidean entries (checked by Nlpsol)
+      std::fill(amb2tan_.begin(), amb2tan_.end(), -1);
+      for (auto&& L : leaves) {
+        if (!L.m.is_euclidean()) continue;
+        for (casadi_int i=0; i<L.m.nx(); ++i) amb2tan_[L.offset+i] = L.offset_tangent+i;
+      }
+    }
+    // Normalization matrices of the dynamics rows
+    M_offsets_ = {0};
+    for (casadi_int k=0; k<N_; ++k) M_offsets_.push_back(M_offsets_.back() + nxs_[k+1]*nxs_[k+1]);
+    (void)nt;
   }
 
   int FatropInterface::init_mem(void* mem) const {
@@ -666,6 +835,7 @@ void FatropInterface::codegen_declarations(CodeGenerator& g) const {
   if (exact_hessian_) {
     g.add_dependency(get_function("nlp_hess_l"));
   }
+  if (manifold_) g.add_dependency(get_function("nlp_step"));
   g.add_include("fatrop/ocp/OCPCInterface.h");
 
   std::string name = "fatrop_cb_write";
@@ -806,6 +976,14 @@ void FatropInterface::set_fatrop_prob() {
   p_.nlp_grad_f = OracleCallback("nlp_grad_f", this);
   p_.nlp_f = OracleCallback("nlp_f", this);
   p_.nlp_g = OracleCallback("nlp_g", this);
+  p_.manifold = manifold_;
+  p_.nx_amb = get_ptr(nxs_amb_);
+  p_.nu_amb = get_ptr(nus_amb_);
+  p_.amb_off = get_ptr(amb_offs_);
+  p_.amb2tan = get_ptr(amb2tan_);
+  p_.M_offsets = get_ptr(M_offsets_);
+  p_.nt = manifold_ ? x_manifold_.ndx() : nx_;
+  if (manifold_) p_.nlp_step = OracleCallback("nlp_step", this);
   p_.write = &casadi_c_logger_write;
   p_.flush = &casadi_c_logger_flush;
 
@@ -859,6 +1037,14 @@ void FatropInterface::set_fatrop_prob(CodeGenerator& g) const {
   codegen_unpack_block(g, "RSQ", RSQ_blocks_);
   codegen_unpack_block(g, "I", I_blocks_);
   g << "p.N = " << N_ << ";\n";
+  g << "p.manifold = " << static_cast<casadi_int>(manifold_) << ";\n";
+  g << "p.nx_amb = " << g.constant(nxs_amb_) << ";\n";
+  g << "p.nu_amb = " << g.constant(nus_amb_) << ";\n";
+  g << "p.amb_off = " << g.constant(amb_offs_) << ";\n";
+  g << "p.amb2tan = " << g.constant(amb2tan_) << ";\n";
+  g << "p.M_offsets = " << g.constant(M_offsets_) << ";\n";
+  g << "p.nt = " << (manifold_ ? x_manifold_.ndx() : nx_) << ";\n";
+  if (manifold_) g.setup_callback("p.nlp_step", get_function("nlp_step"));
 
   g.setup_callback("p.nlp_jac_g", get_function("nlp_jac_g"));
   g.setup_callback("p.nlp_grad_f", get_function("nlp_grad_f"));
@@ -881,7 +1067,7 @@ void FatropInterface::set_fatrop_prob(CodeGenerator& g) const {
 }
 
 FatropInterface::FatropInterface(DeserializingStream& s) : Nlpsol(s) {
-  s.version("FatropInterface", 1);
+  int version = s.version("FatropInterface", 1, 2);
   s.unpack("FatropInterface::jacg_sp", jacg_sp_);
   s.unpack("FatropInterface::hesslag_sp", hesslag_sp_);
   s.unpack("FatropInterface::exact_hessian", exact_hessian_);
@@ -922,13 +1108,24 @@ FatropInterface::FatropInterface(DeserializingStream& s) : Nlpsol(s) {
   s.unpack("FatropInterface::RSQ_offsets", RSQ_offsets_);
   s.unpack("FatropInterface::I_offsets", I_offsets_);
   s.unpack("FatropInterface::debug", debug_);
+  if (version>=2) {
+    s.unpack("FatropInterface::manifold", manifold_);
+    s.unpack("FatropInterface::nxs_amb", nxs_amb_);
+    s.unpack("FatropInterface::nus_amb", nus_amb_);
+    s.unpack("FatropInterface::amb_offs", amb_offs_);
+    s.unpack("FatropInterface::amb2tan", amb2tan_);
+    s.unpack("FatropInterface::M_offsets", M_offsets_);
+  } else {
+    manifold_ = false;
+    init_ambient_structure();
+  }
 
   set_fatrop_prob();
 }
 
 void FatropInterface::serialize_body(SerializingStream &s) const {
   Nlpsol::serialize_body(s);
-  s.version("FatropInterface", 1);
+  s.version("FatropInterface", 2);
 
   s.pack("FatropInterface::jacg_sp", jacg_sp_);
   s.pack("FatropInterface::hesslag_sp", hesslag_sp_);
@@ -956,6 +1153,12 @@ void FatropInterface::serialize_body(SerializingStream &s) const {
   s.pack("FatropInterface::RSQ_offsets", RSQ_offsets_);
   s.pack("FatropInterface::I_offsets", I_offsets_);
   s.pack("FatropInterface::debug", debug_);
+  s.pack("FatropInterface::manifold", manifold_);
+  s.pack("FatropInterface::nxs_amb", nxs_amb_);
+  s.pack("FatropInterface::nus_amb", nus_amb_);
+  s.pack("FatropInterface::amb_offs", amb_offs_);
+  s.pack("FatropInterface::amb2tan", amb2tan_);
+  s.pack("FatropInterface::M_offsets", M_offsets_);
 }
 
 } // namespace casadi

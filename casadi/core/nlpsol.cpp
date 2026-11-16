@@ -1444,19 +1444,48 @@ namespace casadi {
     g.copy_default(d_nlp + ".ubx",    nx_, d_nlp + ".ubz", "casadi_inf",  false);
     g.copy_default(d_nlp + ".lam_x0", nx_, d_nlp + ".lam", "0",           false);
 
+    if (!x_manifold_.is_null()) {
+      // Project the initial guess onto the manifold (default: identity element)
+      g << "arg[0] = " << d_nlp << ".x0 ? " << d_nlp << ".x0 : "
+        << g.constant(manifold_identity_) << ";\n";
+      g << "res[0] = " << d_nlp << ".z;\n";
+      g << "if (" << g(manifold_project_, "arg", "res", "iw", "w") << ") return 1;\n";
+      // Simple bounds are only allowed on Euclidean entries
+      std::vector<casadi_int> non_euclidean;
+      for (casadi_int i=0; i<nx_; ++i) if (!manifold_mask_[i]) non_euclidean.push_back(i);
+      if (!non_euclidean.empty()) {
+        g.local("i", "casadi_int");
+        g.local("ne", "const casadi_int*");
+        g.init_local("ne", g.constant(non_euclidean));
+        g << "for (i=0; i<" << non_euclidean.size() << "; ++i) {\n";
+        g << "if (" << d_nlp << ".lbz[ne[i]]!=-casadi_inf || " << d_nlp
+          << ".ubz[ne[i]]!=casadi_inf) return 1;\n";
+        g << "}\n";
+      }
+    }
+
     if (detect_simple_bounds_is_simple_.empty()) {
-      g.copy_default(d_nlp + ".lbg",    ng_, d_nlp + ".lbz+" + str(nx_), "-casadi_inf", false);
-      g.copy_default(d_nlp + ".ubg",    ng_, d_nlp + ".ubz+" + str(nx_), "casadi_inf",  false);
-      g.copy_default(d_nlp + ".lam_g0", ng_, d_nlp + ".lam+" + str(nx_), "0",           false);
+      casadi_int ngu = ng_user();
+      g.copy_default(d_nlp + ".lbg",    ngu, d_nlp + ".lbz+" + str(nx_), "-casadi_inf", false);
+      g.copy_default(d_nlp + ".ubg",    ngu, d_nlp + ".ubz+" + str(nx_), "casadi_inf",  false);
+      g.copy_default(d_nlp + ".lam_g0", ngu, d_nlp + ".lam+" + str(nx_), "0",           false);
+      if (manifold_n_embed_>0) {
+        // Embedding constraints of the manifold: c(x) == 0
+        g << g.fill(d_nlp + ".lbz+" + str(nx_+ngu), manifold_n_embed_, "0") << "\n";
+        g << g.fill(d_nlp + ".ubz+" + str(nx_+ngu), manifold_n_embed_, "0") << "\n";
+        g << g.fill(d_nlp + ".lam+" + str(nx_+ngu), manifold_n_embed_, "0") << "\n";
+      }
     } else {
       g << "if (casadi_nlpsol_detect_bounds_before(&" << d_nlp << ")) return 1;\n";
     }
   }
 
   void Nlpsol::codegen_declarations(CodeGenerator& g) const {
-    casadi_assert(x_manifold_.is_null(),
-      "Code generation is not yet supported with option 'x_manifold'.");
+    // Plugins without native support use the embed fallback, which needs no extra code
+    casadi_assert(x_manifold_.is_null() || !supports_manifold() || supports_manifold_codegen(),
+      "Code generation is not yet supported with option 'x_manifold' for " + class_name() + ".");
     g.add_auxiliary(CodeGenerator::AUX_FILL);
+    if (!x_manifold_.is_null()) g.add_dependency(manifold_project_);
     g.add_auxiliary(CodeGenerator::AUX_INF);
     if (calc_f_ || calc_g_ || calc_lam_x_ || calc_lam_p_)
       g.add_dependency(get_function("nlp_grad"));
@@ -1504,10 +1533,17 @@ namespace casadi {
 
     g << g.copy(d_nlp + ".z", nx_, d_nlp + ".x") << "\n";
 
+    if (!x_manifold_.is_null()) {
+      // No simple bounds act on non-Euclidean entries
+      for (casadi_int i=0; i<nx_; ++i) {
+        if (!manifold_mask_[i]) g << d_nlp << ".lam[" << i << "] = 0;\n";
+      }
+    }
+
     if (detect_simple_bounds_is_simple_.empty()) {
-      g << g.copy(d_nlp + ".z + " + str(nx_), ng_, d_nlp + ".g") << "\n";
+      g << g.copy(d_nlp + ".z + " + str(nx_), ng_user(), d_nlp + ".g") << "\n";
       g << g.copy(d_nlp + ".lam", nx_, d_nlp + ".lam_x") << "\n";
-      g << g.copy(d_nlp + ".lam + " + str(nx_), ng_, d_nlp + ".lam_g") << "\n";
+      g << g.copy(d_nlp + ".lam + " + str(nx_), ng_user(), d_nlp + ".lam_g") << "\n";
     } else {
       g << "if (casadi_nlpsol_detect_bounds_after(&" << d_nlp << ")) return 1;\n";
     }
@@ -1620,6 +1656,72 @@ namespace casadi {
     }
     if (!x_manifold_.is_null()) init_manifold();
     set_nlpsol_prob();
+  }
+
+  static void nlpsol_manifold_leaves(const Manifold& M, casadi_int offset,
+                                     casadi_int offset_tangent,
+                                     std::vector<Nlpsol::ManifoldLeaf>& leaves) {
+    if (M.n_components()==1 && M.component(0).get()==M.get()) {
+      leaves.push_back({M, offset, offset_tangent});
+      return;
+    }
+    std::vector<casadi_int> off = M.offsets(), off_tan = M.offsets_tangent();
+    for (casadi_int i=0; i<M.n_components(); ++i) {
+      nlpsol_manifold_leaves(M.component(i), offset + off[i], offset_tangent + off_tan[i],
+                             leaves);
+    }
+  }
+
+  std::vector<Nlpsol::ManifoldLeaf> Nlpsol::manifold_leaves() const {
+    std::vector<ManifoldLeaf> leaves;
+    if (!x_manifold_.is_null()) nlpsol_manifold_leaves(x_manifold_, 0, 0, leaves);
+    return leaves;
+  }
+
+  template<typename X>
+  static Function nlpsol_manifold_local_oracle(const Function& oracle, const Manifold& M,
+      casadi_int nd, const std::vector<casadi_int>& tan_idx,
+      const std::vector<casadi_int>& pad_idx) {
+    X x = X::sym("x", oracle.sparsity_in(NL_X));
+    X p = X::sym("p", oracle.sparsity_in(NL_P));
+    X d = X::sym("d", nd);
+    X dt = tan_idx.empty() ? X(0, 1) : X(d(tan_idx));
+    std::vector<X> fg = oracle(std::vector<X>{reshape(M.retract(vec(x), dt), x.size()), p});
+    X f = fg.at(NL_F);
+    if (!pad_idx.empty()) f += 0.5*sumsqr(d(pad_idx));
+    return Function("nlp_local", {x, p, d}, {f, fg.at(NL_G)},
+                    {"x", "p", "d"}, {"f", "g"});
+  }
+
+  Function Nlpsol::manifold_local_oracle(casadi_int nd, const std::vector<casadi_int>& tan_idx,
+                                         const std::vector<casadi_int>& pad_idx) const {
+    return oracle_.is_a("SXFunction")
+      ? nlpsol_manifold_local_oracle<SX>(oracle_, x_manifold_, nd, tan_idx, pad_idx)
+      : nlpsol_manifold_local_oracle<MX>(oracle_, x_manifold_, nd, tan_idx, pad_idx);
+  }
+
+  void Nlpsol::manifold_create_function(const Function& local, const std::string& fname,
+                                        const std::vector<std::string>& s_in,
+                                        const std::vector<std::string>& s_out,
+                                        const Function::AuxOut& aux) {
+    std::vector<std::string> s_in_d = s_in;
+    s_in_d.push_back("d");
+    Function f = local.factory(fname + "_local", s_in_d, s_out, aux);
+    // Fix d = 0
+    std::vector<MX> arg = f.mx_in();
+    std::vector<MX> call_arg = arg;
+    call_arg.back() = MX::zeros(f.sparsity_in(f.n_in()-1));
+    arg.pop_back();
+    Function ret(fname, arg, f(call_arg), s_in, f.name_out());
+    if (local.is_a("SXFunction")) ret = ret.expand();
+    set_function(ret, fname);
+  }
+
+  void Nlpsol::manifold_create_step(casadi_int nd, const std::vector<casadi_int>& tan_idx) {
+    SX x = SX::sym("x", nx_), dx = SX::sym("dx", nd), t = SX::sym("t");
+    SX dt = tan_idx.empty() ? SX(0, 1) : SX(dx(tan_idx));
+    set_function(Function("nlp_step", {x, dx, t}, {x_manifold_.retract(x, t*dt)},
+                          {"x", "dx", "t"}, {"x_next"}), "nlp_step");
   }
 
   void Nlpsol::init_manifold() {

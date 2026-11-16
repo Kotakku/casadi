@@ -105,6 +105,37 @@ namespace casadi {
     casadi_int ng_user() const { return ng_ - manifold_n_embed_;}
     /// Initialize the manifold data from x_manifold_
     void init_manifold();
+
+    /// A leaf of x_manifold_ (product manifolds are expanded recursively)
+    struct ManifoldLeaf {
+      Manifold m;
+      casadi_int offset;          ///< offset in x
+      casadi_int offset_tangent;  ///< offset in the tangent vector of x_manifold_
+    };
+
+    /// Leaves of x_manifold_ in the order of x
+    std::vector<ManifoldLeaf> manifold_leaves() const;
+
+    /** \brief Local parametrization of the NLP around x for solvers with native manifold support
+
+        Returns (x, p, d) -> (f, g) evaluated at retract(x, d(tan_idx)), with
+        0.5*|d(pad_idx)|^2 added to f. d has length nd.
+    */
+    Function manifold_local_oracle(casadi_int nd, const std::vector<casadi_int>& tan_idx,
+                                   const std::vector<casadi_int>& pad_idx) const;
+
+    /** \brief Register a derivative of a local oracle at d = 0
+
+        Creates local.factory(...) with inputs s_in + {"d"}, fixes d = 0 and registers the
+        result under fname with inputs s_in (expanded if the local oracle is an SX function).
+    */
+    void manifold_create_function(const Function& local, const std::string& fname,
+                                  const std::vector<std::string>& s_in,
+                                  const std::vector<std::string>& s_out,
+                                  const Function::AuxOut& aux=Function::AuxOut());
+
+    /// Register nlp_step: (x, dx[nd], t) -> retract(x, t*dx(tan_idx))
+    void manifold_create_step(casadi_int nd, const std::vector<casadi_int>& tan_idx);
     ///@}
 
     ///@{
@@ -234,6 +265,9 @@ namespace casadi {
         and update the iterate with Manifold::retract.
     */
     virtual bool supports_manifold() const { return false;}
+
+    /// Can the plugin generate code with option x_manifold?
+    virtual bool supports_manifold_codegen() const { return false;}
 
     /** \brief Set the (persistent) work vectors
 
