@@ -117,6 +117,9 @@ namespace casadi {
     /// Names accepted by get_function
     static std::vector<std::string> function_names();
 
+    /// Initialization after the node is owned by a Manifold
+    virtual void init_custom() {}
+
     /// Is fname a Lie group operation?
     static bool is_lie_function(const std::string& fname);
 
@@ -273,6 +276,30 @@ namespace casadi {
     SX hat_sx(const SX& v) const override;
     SX vee_sx(const SX& V) const override;
     SX as_matrix_sx(const SX& a) const override;
+  };
+
+  /** \brief User-defined manifold from retract and minus Functions */
+  class CASADI_EXPORT CustomManifold : public ManifoldInternal {
+  public:
+    CustomManifold(const std::string& name, const Function& retract, const Function& minus,
+                   const Dict& opts);
+    std::string class_name() const override {return "CustomManifold";}
+    std::string repr() const override {return "Manifold(" + name_ + ")";}
+    std::vector<bool> euclidean_mask() const override {return mask_;}
+    std::vector<bool> euclidean_mask_tangent() const override {return mask_tan_;}
+    DM identity() const override {return identity_;}
+    void init_custom() override;
+    SX retract_sx(const SX& x, const SX& dx) const override;
+    SX minus_sx(const SX& y, const SX& x) const override;
+    SX project_sx(const SX& x) const override;
+    SX constraint_sx(const SX& x) const override;
+  protected:
+    /// Numerical consistency check
+    void check() const;
+    Function retract_, minus_, project_, constraint_;
+    DM identity_;
+    bool has_identity_, check_;
+    std::vector<bool> mask_, mask_tan_;
   };
 
   /** \brief Cartesian product of manifolds */

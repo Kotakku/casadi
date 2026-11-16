@@ -31,6 +31,12 @@ namespace casadi {
   Manifold::Manifold() {
   }
 
+  Manifold::Manifold(const std::string& name, const Function& retract, const Function& minus,
+                     const Dict& opts) {
+    own(new CustomManifold(name, retract, minus, opts));
+    (*this)->init_custom();
+  }
+
   Manifold Manifold::create(ManifoldInternal* node) {
     Manifold ret;
     ret.own(node);

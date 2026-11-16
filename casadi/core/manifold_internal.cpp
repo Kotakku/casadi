@@ -313,6 +313,131 @@ namespace casadi {
   SX EuclideanManifold::Jl_inv_sx(const SX& v) const { return SX::eye(nx_);}
 
   // ---------------------------------------------------------------------------
+  // CustomManifold
+  // ---------------------------------------------------------------------------
+
+  namespace {
+    void check_io(const std::string& mname, const std::string& fname, const Function& f,
+                  const std::vector<casadi_int>& n_in, casadi_int n_out) {
+      std::string pre = "Manifold '" + mname + "': Function '" + fname + "' ";
+      casadi_assert(!f.is_null(), pre + "is null.");
+      casadi_assert(f.n_in()==n_in.size() && f.n_out()==1,
+        pre + "must have " + str(n_in.size()) + " input(s) and 1 output, got "
+        + str(f.n_in()) + " and " + str(f.n_out()) + ".");
+      for (casadi_int i=0; i<n_in.size(); ++i) {
+        casadi_assert(f.size1_in(i)==n_in[i] && f.size2_in(i)==1,
+          pre + "input " + str(i) + " must be " + str(n_in[i]) + "-by-1, got "
+          + f.sparsity_in(i).dim() + ".");
+      }
+      if (n_out>=0) {
+        casadi_assert(f.size1_out(0)==n_out && f.size2_out(0)==1,
+          pre + "output must be " + str(n_out) + "-by-1, got " + f.sparsity_out(0).dim() + ".");
+      } else {
+        casadi_assert(f.size2_out(0)==1 || f.numel_out(0)==0,
+          pre + "output must be a column vector, got " + f.sparsity_out(0).dim() + ".");
+      }
+    }
+
+  } // namespace
+
+  CustomManifold::CustomManifold(const std::string& name, const Function& retract,
+                                 const Function& minus, const Dict& opts)
+      : ManifoldInternal(name,
+          retract.is_null() || retract.n_in()<2 ? 0 : retract.size1_in(0),
+          retract.is_null() || retract.n_in()<2 ? 0 : retract.size1_in(1)),
+        retract_(retract), minus_(minus), has_identity_(false), check_(true) {
+    casadi_assert(!retract.is_null() && retract.n_in()==2,
+      "Manifold '" + name + "': retract must be a Function with inputs (x, dx).");
+    check_io(name, "retract", retract_, {nx_, ndx_}, nx_);
+    check_io(name, "minus", minus_, {nx_, nx_}, ndx_);
+    mask_.resize(nx_, false);
+    mask_tan_.resize(ndx_, false);
+    identity_ = DM::zeros(nx_, 1);
+    for (auto&& op : opts) {
+      if (op.first=="project") {
+        project_ = op.second;
+        check_io(name, "project", project_, {nx_}, nx_);
+      } else if (op.first=="constraint") {
+        constraint_ = op.second;
+        check_io(name, "constraint", constraint_, {nx_}, -1);
+      } else if (op.first=="identity") {
+        std::vector<double> e = op.second;
+        casadi_assert(e.size()==nx_, "Manifold '" + name + "': 'identity' must have length "
+          + str(nx_) + ", got " + str(e.size()) + ".");
+        identity_ = DM(e);
+        has_identity_ = true;
+      } else if (op.first=="euclidean_mask") {
+        mask_ = op.second.to_bool_vector();
+        casadi_assert(mask_.size()==nx_, "Manifold '" + name
+          + "': 'euclidean_mask' must have length " + str(nx_) + ".");
+      } else if (op.first=="euclidean_mask_tangent") {
+        mask_tan_ = op.second.to_bool_vector();
+        casadi_assert(mask_tan_.size()==ndx_, "Manifold '" + name
+          + "': 'euclidean_mask_tangent' must have length " + str(ndx_) + ".");
+      } else if (op.first=="check") {
+        check_ = op.second;
+      } else {
+        casadi_error("Manifold '" + name + "': unknown option '" + op.first + "'. Available: "
+          "project, constraint, identity, euclidean_mask, euclidean_mask_tangent, check.");
+      }
+    }
+  }
+
+  void CustomManifold::init_custom() {
+    if (check_) check();
+  }
+
+  SX CustomManifold::retract_sx(const SX& x, const SX& dx) const {
+    return retract_(std::vector<SX>{x, dx}).at(0);
+  }
+
+  SX CustomManifold::minus_sx(const SX& y, const SX& x) const {
+    return minus_(std::vector<SX>{y, x}).at(0);
+  }
+
+  SX CustomManifold::project_sx(const SX& x) const {
+    return project_.is_null() ? x : project_(std::vector<SX>{x}).at(0);
+  }
+
+  SX CustomManifold::constraint_sx(const SX& x) const {
+    return constraint_.is_null() ? SX(0, 1) : constraint_(std::vector<SX>{x}).at(0);
+  }
+
+  void CustomManifold::check() const {
+    // Deterministic pseudo-random numbers in [-1, 1]
+    casadi_int seed = 12345;
+    auto rnd = [&seed](casadi_int n) {
+      DM r = DM::zeros(n, 1);
+      for (casadi_int i=0; i<n; ++i) {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        r(i) = 2.0 * static_cast<double>(seed) / 2147483648.0 - 1.0;
+      }
+      return r;
+    };
+    std::vector<DM> pts;
+    if (has_identity_) pts.push_back(identity_);
+    if (!project_.is_null()) {
+      for (casadi_int k=0; k<3; ++k) pts.push_back(project_(std::vector<DM>{rnd(nx_)}).at(0));
+    }
+    std::string pre = "Manifold '" + name_ + "': consistency check failed: ";
+    std::string post = " (pass the option check=false to disable this check)";
+    for (const DM& x : pts) {
+      double scale = 1 + norm_inf(x).scalar();
+      DM r0 = retract_(std::vector<DM>{x, DM::zeros(ndx_, 1)}).at(0);
+      casadi_assert(norm_inf(r0 - x).scalar() <= 1e-9*scale,
+        pre + "retract(x, 0) != x at x = " + str(x) + post);
+      DM m0 = minus_(std::vector<DM>{x, x}).at(0);
+      casadi_assert(norm_inf(m0).scalar() <= 1e-9*scale,
+        pre + "minus(x, x) != 0 at x = " + str(x) + post);
+      DM dx = 1e-4 * rnd(ndx_);
+      DM y = retract_(std::vector<DM>{x, dx}).at(0);
+      DM d = minus_(std::vector<DM>{y, x}).at(0);
+      casadi_assert(norm_inf(d - dx).scalar() <= 1e-6*scale,
+        pre + "minus(retract(x, dx), x) != dx at x = " + str(x) + ", dx = " + str(dx) + post);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // ProductManifold
   // ---------------------------------------------------------------------------
 

@@ -73,6 +73,30 @@ namespace casadi {
     /// Default constructor (null object)
     Manifold();
 
+    /** \brief User-defined manifold
+
+        \param name     Name, used as prefix of the generated Functions
+        \param retract  Function (x[nx], dx[ndx]) -> (x_next[nx])
+        \param minus    Function (y[nx], x[nx]) -> (dx[ndx]), the local inverse
+                        of retract: retract(x, minus(y, x)) = y
+        \param opts     Options:
+          - project (Function: x[nx] -> x_proj[nx]): projection onto the manifold
+          - constraint (Function: x[nx] -> c[m]): embedding constraint c(x) = 0
+          - identity (vector of length nx): reference element (default: zeros)
+          - euclidean_mask (bool vector of length nx, default: all false)
+          - euclidean_mask_tangent (bool vector of length ndx, default: all false)
+          - check (bool, default true): check numerically, at the identity
+            (if given) and at projected random points (if project is given),
+            that retract(x, 0) = x, minus(x, x) = 0 and
+            minus(retract(x, dx), x) = dx for small dx
+
+        The Functions must support evaluation with SX arguments (e.g. any
+        SX Function, or an MX Function built from standard operations).
+        A user-defined manifold is not a Lie group.
+    */
+    Manifold(const std::string& name, const Function& retract, const Function& minus,
+             const Dict& opts=Dict());
+
     /// Readable name of the class
     static std::string type_name() {return "Manifold";}
 

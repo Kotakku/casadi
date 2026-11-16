@@ -472,5 +472,108 @@ class SO2SE2SE3Tests(casadiTestCase):
                                             M.component(1).act(a[4:], p[2:])))
 
 
+def sphere_functions():
+  # type: () -> tuple[ca.Function, ca.Function, ca.Function]
+  """Unit sphere S2 (nx=3, ndx=2) with the normalization retraction"""
+  x = ca.SX.sym("x", 3)
+  y = ca.SX.sym("y", 3)
+  dx = ca.SX.sym("dx", 2)
+  a, b, c = x[0], x[1], x[2]
+  # orthonormal basis of the tangent plane at x (valid for c > -1)
+  B = ca.horzcat(ca.vertcat(1 - a*a/(1 + c), -a*b/(1 + c), -a),
+                 ca.vertcat(-a*b/(1 + c), 1 - b*b/(1 + c), -b))
+  z = x + ca.mtimes(B, dx)
+  retract = ca.Function("S2_retract", [x, dx], [z/ca.norm_2(z)])
+  minus = ca.Function("S2_minus", [y, x], [ca.mtimes(B.T, y/ca.dot(x, y) - x)])
+  project = ca.Function("S2_project", [x], [x/ca.norm_2(x)])
+  return retract, minus, project
+
+
+class CustomManifoldTests(casadiTestCase):
+
+  def test_sphere(self):
+    retract, minus, project = sphere_functions()
+    c = ca.SX.sym("x", 3)
+    constraint = ca.Function("S2_c", [c], [ca.dot(c, c) - 1])
+    S2 = ca.Manifold("S2", retract, minus,
+                     {"project": project, "constraint": constraint, "identity": [0, 0, 1]})
+    self.assertEqual((S2.nx(), S2.ndx()), (3, 2))
+    self.assertFalse(S2.is_lie_group())
+    self.assertFalse(S2.is_euclidean())
+    self.assertEqual(str(S2), "Manifold(S2)")
+    self.checkarray(S2.identity(), ca.DM([0, 0, 1]))
+    x = S2.project(ca.DM([1, 2, 3]))
+    self.checkarray(S2.constraint(x), ca.DM(0))
+    dx = ca.DM([0.1, -0.2])
+    y = S2.retract(x, dx)
+    self.checkarray(S2.minus(y, x), dx)
+    self.checkarray(S2.constraint(y), ca.DM(0))
+    with self.assertRaises(Exception):
+      S2.exp(dx)
+    with self.assertRaises(Exception):
+      S2.get_function("compose")
+    # symbolic use and products with built-in manifolds
+    M = ca.Manifold.product([ca.Manifold.Euclidean(1), S2])
+    self.assertFalse(M.is_lie_group())
+    xs = ca.MX.sym("x", 4)
+    dxs = ca.MX.sym("dx", 3)
+    f = ca.Function("f", [xs, dxs], [M.retract(xs, dxs)])
+    self.checkarray(f(ca.vertcat(1, x), ca.vertcat(2, dx)), ca.vertcat(3, y))
+
+  def test_positive_reals(self):
+    # R+^n with the multiplicative retraction, built from MX Functions
+    x = ca.MX.sym("x", 2)
+    y = ca.MX.sym("y", 2)
+    dx = ca.MX.sym("dx", 2)
+    retract = ca.Function("r", [x, dx], [x*ca.exp(dx)])
+    minus = ca.Function("m", [y, x], [ca.log(y/x)])
+    P = ca.Manifold("Rplus", retract, minus, {"identity": [1, 1]})
+    self.checkarray(P.retract(ca.DM([2, 3]), ca.DM([0, np.log(2)])), ca.DM([2, 6]))
+    self.checkarray(P.minus(ca.DM([2, 6]), ca.DM([2, 3])), ca.DM([0, np.log(2)]))
+    self.assertEqual(list(P.euclidean_mask()), [False, False])
+
+  def test_options(self):
+    x = ca.SX.sym("x", 2)
+    y = ca.SX.sym("y", 2)
+    dx = ca.SX.sym("dx", 2)
+    retract = ca.Function("r", [x, dx], [x + dx])
+    minus = ca.Function("m", [y, x], [y - x])
+    M = ca.Manifold("flat", retract, minus,
+                    {"euclidean_mask": [True, False], "euclidean_mask_tangent": [False, True]})
+    self.assertEqual(list(M.euclidean_mask()), [True, False])
+    self.assertEqual(list(M.euclidean_mask_tangent()), [False, True])
+    with self.assertRaises(Exception):
+      ca.Manifold("flat", retract, minus, {"no_such_option": 1})
+    with self.assertRaises(Exception):
+      ca.Manifold("flat", retract, minus, {"identity": [1, 2, 3]})
+    with self.assertRaises(Exception):
+      ca.Manifold("flat", retract, minus, {"euclidean_mask": [True]})
+
+  def test_check(self):
+    x = ca.SX.sym("x", 2)
+    y = ca.SX.sym("y", 2)
+    dx = ca.SX.sym("dx", 2)
+    retract = ca.Function("r", [x, dx], [x + dx])
+    wrong_minus = ca.Function("m", [y, x], [x - y])
+    with self.assertRaises(Exception):
+      ca.Manifold("bad", retract, wrong_minus, {"identity": [0, 0]})
+    # disabled check
+    ca.Manifold("bad", retract, wrong_minus, {"identity": [0, 0], "check": False})
+    # without identity or project there are no points to check
+    ca.Manifold("bad", retract, wrong_minus)
+
+  def test_dimension_mismatch(self):
+    x = ca.SX.sym("x", 3)
+    y = ca.SX.sym("y", 3)
+    dx = ca.SX.sym("dx", 2)
+    retract = ca.Function("r", [x, dx], [x])
+    # minus must return ndx = 2 rows
+    with self.assertRaises(Exception):
+      ca.Manifold("bad", retract, ca.Function("m", [y, x], [y - x]))
+    # minus must take (y[nx], x[nx])
+    with self.assertRaises(Exception):
+      ca.Manifold("bad", retract, ca.Function("m", [y, dx], [dx]))
+
+
 if __name__ == '__main__':
     unittest.main()
