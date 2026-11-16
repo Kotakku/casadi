@@ -12102,6 +12102,13 @@
                   "type": "casadi_int"
                 }
               ],
+              "20": [
+                {
+                  "name": "GenericType::d",
+                  "op": "field",
+                  "type": "Manifold"
+                }
+              ],
               "3": [
                 {
                   "name": "GenericType::d",
@@ -13495,6 +13502,90 @@
           }
         ],
         "decoration": "X",
+        "shared": true
+      },
+      "Manifold": {
+        "body": [
+          {
+            "name": "Manifold::null",
+            "op": "field",
+            "type": "bool"
+          },
+          {
+            "body": [
+              {
+                "name": "Manifold",
+                "op": "version",
+                "value": 1
+              },
+              {
+                "name": "Manifold::type",
+                "op": "field",
+                "type": "std::string"
+              },
+              {
+                "cases": {
+                  "CustomManifold": [
+                    {
+                      "layout": "CustomManifold::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "EuclideanManifold": [
+                    {
+                      "layout": "EuclideanManifold::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "ProductManifold": [
+                    {
+                      "layout": "ProductManifold::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SE2Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SE3Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SO2Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SO3Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ]
+                },
+                "op": "select",
+                "value": [
+                  "field",
+                  "Manifold::type"
+                ]
+              }
+            ],
+            "condition": [
+              "not",
+              [
+                "field",
+                "Manifold::null"
+              ]
+            ],
+            "op": "if"
+          }
+        ],
+        "decoration": "Y",
         "shared": true
       },
       "Resource": {
