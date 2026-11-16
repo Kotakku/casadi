@@ -35,6 +35,7 @@
 #include <fstream>
 #include <cmath>
 #include <cfloat>
+#include <algorithm>
 
 namespace casadi {
 
@@ -268,6 +269,9 @@ void Sqpmethod::init(const Dict& opts) {
 
   // Get/generate required functions
   if (max_iter_ls_ || so_corr_) create_function("nlp_fg", {"x", "p"}, {"f", "g"});
+
+  // Optimization on a manifold: derivatives in (padded) tangent coordinates
+  if (!x_manifold_.is_null()) init_manifold_functions();
   // First order derivative information
 
   if (!has_function("nlp_jac_fg")) {
@@ -351,6 +355,7 @@ void Sqpmethod::init(const Dict& opts) {
   casadi_sqpmethod_work(&p_, &sz_iw, &sz_w);
   alloc_iw(sz_iw, true);
   alloc_w(sz_w, true);
+  if (!x_manifold_.is_null()) alloc_w(nx_, true); // x_next
   if (convexify_) {
     alloc_iw(convexify_data_.sz_iw);
     alloc_w(convexify_data_.sz_w);
@@ -376,6 +381,14 @@ void Sqpmethod::set_work(void* mem, const double**& arg, double**& res,
 
   m->d.prob = &p_;
   casadi_sqpmethod_set_work(&m->d, &arg, &res, &iw, &w);
+
+  // Scratch for steps along a manifold
+  if (!x_manifold_.is_null()) {
+    m->x_next = w;
+    w += nx_;
+  } else {
+    m->x_next = nullptr;
+  }
 
   m->iter_count = -1;
 }
@@ -608,8 +621,7 @@ int Sqpmethod::solve(void* mem) const {
     l1_infeas_cand = 0;
     if (so_corr_) {
       // Take candidate step
-      casadi_copy(d_nlp->z, nx_, d->z_cand);
-      casadi_axpy(nx_, 1., d->dx, d->z_cand);
+      if (take_step(m, d_nlp->z, 1., d->dx, d->z_cand)) return 1;
 
       // Evaluating objective and constraints
       m->arg[0] = d->z_cand;
@@ -687,8 +699,7 @@ int Sqpmethod::solve(void* mem) const {
         double l1_cand_soc;
 
         // Take candidate step
-        casadi_copy(d_nlp->z, nx_, d->z_cand);
-        casadi_axpy(nx_, 1., d->dx, d->z_cand);
+        if (take_step(m, d_nlp->z, 1., d->dx, d->z_cand)) return 1;
 
         // Evaluating objective and constraints
         m->arg[0] = d->z_cand;
@@ -742,8 +753,7 @@ int Sqpmethod::solve(void* mem) const {
         ls_iter++;
 
         // Candidate step
-        casadi_copy(d_nlp->z, nx_, d->z_cand);
-        casadi_axpy(nx_, t, d->dx, d->z_cand);
+        if (take_step(m, d_nlp->z, t, d->dx, d->z_cand)) return 1;
 
         // Evaluating objective and constraints
         if (!so_corr_ || !so_succes) {
@@ -791,7 +801,12 @@ int Sqpmethod::solve(void* mem) const {
     }
 
     // Take step
-    casadi_axpy(nx_, 1., d->dx, d_nlp->z);
+    if (x_manifold_.is_null()) {
+      casadi_axpy(nx_, 1., d->dx, d_nlp->z);
+    } else {
+      if (take_step(m, d_nlp->z, 1., d->dx, m->x_next)) return 1;
+      casadi_copy(m->x_next, nx_, d_nlp->z);
+    }
 
     if (!exact_hessian_) {
       // Evaluate the gradient of the Lagrangian with the old x but new lam (for BFGS)
@@ -808,6 +823,105 @@ int Sqpmethod::solve(void* mem) const {
   }
 
   return 0;
+}
+
+namespace {
+  // Leaves of a (possibly nested) product manifold, with their ambient offsets
+  void manifold_leaves(const Manifold& M, casadi_int offset,
+                       std::vector<std::pair<Manifold, casadi_int> >& leaves) {
+    if (M.n_components()==1 && M.component(0).get()==M.get()) {
+      leaves.push_back({M, offset});
+      return;
+    }
+    std::vector<casadi_int> off = M.offsets();
+    for (casadi_int i=0; i<M.n_components(); ++i) {
+      manifold_leaves(M.component(i), offset + off[i], leaves);
+    }
+  }
+
+  // Local parametrization of the NLP: (x, p, d) -> (f, g) at retract(x, P d)
+  template<typename X>
+  Function manifold_local_oracle(const Function& oracle, const Manifold& M,
+                                 const std::vector<casadi_int>& tan_idx,
+                                 const std::vector<casadi_int>& pad_idx) {
+    X x = X::sym("x", oracle.sparsity_in(NL_X));
+    X p = X::sym("p", oracle.sparsity_in(NL_P));
+    X d = X::sym("d", x.numel());
+    X dt = tan_idx.empty() ? X(0, 1) : X(d(tan_idx));
+    std::vector<X> fg = oracle(std::vector<X>{reshape(M.retract(vec(x), dt), x.size()), p});
+    X f = fg.at(NL_F);
+    if (!pad_idx.empty()) f += 0.5*sumsqr(d(pad_idx));
+    return Function("nlp_local", {x, p, d}, {f, fg.at(NL_G)},
+                    {"x", "p", "d"}, {"f", "g"});
+  }
+
+  // Fix the input d = 0 of a function with inputs (x, p, ..., d)
+  Function manifold_at_zero(const Function& f, const std::string& name) {
+    std::vector<MX> arg = f.mx_in();
+    std::vector<MX> call_arg = arg;
+    call_arg.back() = MX::zeros(f.sparsity_in(f.n_in()-1));
+    arg.pop_back();
+    std::vector<std::string> name_in = f.name_in();
+    name_in.pop_back();
+    return Function(name, arg, f(call_arg), name_in, f.name_out());
+  }
+} // namespace
+
+void Sqpmethod::init_manifold_functions() {
+  // Padded tangent coordinates
+  std::vector<std::pair<Manifold, casadi_int> > leaves;
+  manifold_leaves(x_manifold_, 0, leaves);
+  std::vector<casadi_int> tan_idx, pad_idx;
+  for (auto&& e : leaves) {
+    const Manifold& L = e.first;
+    std::vector<bool> mask = L.euclidean_mask();
+    bool partially_euclidean = !L.is_euclidean()
+      && std::find(mask.begin(), mask.end(), true) != mask.end();
+    casadi_assert(!partially_euclidean,
+      "sqpmethod: option 'x_manifold' does not support the manifold " + str(L)
+      + ", which is neither Euclidean nor free of Euclidean entries.");
+    for (casadi_int k=0; k<L.nx(); ++k) {
+      (k<L.ndx() ? tan_idx : pad_idx).push_back(e.second + k);
+    }
+  }
+
+  // Local parametrization of the NLP
+  Function local = oracle_.is_a("SXFunction")
+    ? manifold_local_oracle<SX>(oracle_, x_manifold_, tan_idx, pad_idx)
+    : manifold_local_oracle<MX>(oracle_, x_manifold_, tan_idx, pad_idx);
+
+  // First and second order derivatives with respect to d at d = 0
+  Function jac = local.factory("nlp_jac_fg_local", {"x", "p", "d"},
+                               {"f", "grad:f:d", "g", "jac:g:d"});
+  bool sx = local.is_a("SXFunction");
+  Function jac_fg = manifold_at_zero(jac, "nlp_jac_fg");
+  set_function(sx ? jac_fg.expand() : jac_fg, "nlp_jac_fg");
+  if (exact_hessian_) {
+    Function hess = local.factory("nlp_hess_l_local", {"x", "p", "lam:f", "lam:g", "d"},
+                                  {"hess:gamma:d:d"}, {{"gamma", {"f", "g"}}});
+    Function hess_l = manifold_at_zero(hess, "nlp_hess_l");
+    set_function(sx ? hess_l.expand() : hess_l, "nlp_hess_l");
+  }
+
+  // Step along the manifold: (x, dx, t) -> retract(x, t*P dx)
+  SX x = SX::sym("x", nx_), dx = SX::sym("dx", nx_), t = SX::sym("t");
+  SX dt = tan_idx.empty() ? SX(0, 1) : SX(dx(tan_idx));
+  set_function(Function("nlp_step", {x, dx, t}, {x_manifold_.retract(x, t*dt)},
+                        {"x", "dx", "t"}, {"x_next"}), "nlp_step");
+}
+
+int Sqpmethod::take_step(SqpmethodMemory* m, const double* x, double t, const double* dx,
+                         double* x_new) const {
+  if (x_manifold_.is_null()) {
+    casadi_copy(x, nx_, x_new);
+    casadi_axpy(nx_, t, dx, x_new);
+    return 0;
+  }
+  m->arg[0] = x;
+  m->arg[1] = dx;
+  m->arg[2] = &t;
+  m->res[0] = x_new;
+  return calc_function(m, "nlp_step");
 }
 
 void Sqpmethod::print_iteration() const {

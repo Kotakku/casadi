@@ -154,5 +154,157 @@ class ManifoldNlpsolCommonTests(casadiTestCase):
       S2(x0=[0, 0, 1, 0, 0, 0], ubx=[inf, inf, 2, inf, inf, inf])
 
 
+def attitude_ocp(N=10, dt=0.1, native=True):
+  # type: (int, float, bool) -> tuple[dict, ca.Manifold, dict]
+  """Rest-to-rest-free attitude maneuver: state (q, omega) in SO3 x R3, torque in R3"""
+  SO3 = ca.Manifold.SO3()
+  R3 = ca.Manifold.Euclidean(3)
+  Mx = ca.Manifold.product([SO3, R3])
+  q_init = SO3.exp(ca.DM([0.5, 0, 0.3]))
+  q_goal = SO3.exp(ca.DM([1.0, -2.0, 0.5]))
+  X = [ca.SX.sym("x%d" % k, 7) for k in range(N+1)]
+  U = [ca.SX.sym("u%d" % k, 3) for k in range(N)]
+  w, mans, g = [], [], []
+  J = 0
+  for k in range(N+1):
+    w.append(X[k])
+    mans.append(Mx)
+    if k < N:
+      w.append(U[k])
+      mans.append(R3)
+  g.append(SO3.minus(X[0][:4], q_init))
+  g.append(X[0][4:] - ca.DM([0, 2, 0]))
+  for k in range(N):
+    q, om = X[k][:4], X[k][4:]
+    g.append(SO3.minus(X[k+1][:4], SO3.retract(q, om*dt)))
+    g.append(X[k+1][4:] - (om + U[k]*dt))
+    J += ca.sumsqr(U[k])*dt
+  J += 100*ca.sumsqr(SO3.minus(q_goal, X[N][:4])) + 10*ca.sumsqr(X[N][4:])
+  if not native:
+    g += [ca.sumsqr(X[k][:4]) - 1 for k in range(N+1)]
+  x0 = ca.vertcat(*[ca.vertcat(q_init, ca.DM.zeros(3)) if i % 2 == 0 else ca.DM.zeros(3)
+                    for i in range(2*N+1)])
+  lbx = ca.vertcat(*[ca.DM([-inf]*7) if i % 2 == 0 else ca.DM([-3]*3) for i in range(2*N+1)])
+  args = {"x0": x0, "lbx": lbx, "ubx": -lbx, "lbg": 0, "ubg": 0}
+  return {"x": ca.vertcat(*w), "f": J, "g": ca.vertcat(*g)}, ca.Manifold.product(mans), args
+
+
+SQP_OPTS = {"qpsol": "qrqp", "print_header": False, "print_iteration": False,
+            "print_time": False, "print_status": False, "max_iter": 200,
+            "qpsol_options": {"print_iter": False, "print_header": False, "error_on_fail": False}}
+
+
+class ManifoldSqpmethodTests(casadiTestCase):
+  """Native support for x_manifold in sqpmethod"""
+
+  def solver(self, nlp, M, **opts):
+    # type: (dict, ca.Manifold, ...) -> ca.Function
+    o = dict(SQP_OPTS)
+    o["x_manifold"] = M
+    o.update(opts)
+    return ca.nlpsol("S", "sqpmethod", nlp, o)
+
+  def test_attitude(self):
+    M, nlp, q_target = attitude_problem()
+    for X in [ca.SX, ca.MX]:
+      q = X.sym("q", 4)
+      nlp_x = {"x": q, "f": ca.sumsqr(M.minus(q_target, q))}
+      for hess in ["exact", "limited-memory"]:
+        S = self.solver(nlp_x, M, hessian_approximation=hess)
+        r = S(x0=[1, 0, 0, 0])
+        self.assertTrue(S.stats()["success"])
+        self.checkarray(M.minus(r["x"], q_target), ca.DM.zeros(3, 1), digits=8)
+        # the iterate stays on the manifold
+        self.checkarray(ca.norm_2(r["x"]), ca.DM(1), digits=12)
+
+  def test_bounds_and_constraints(self):
+    M, nlp, q_target = pose_problem()
+    S = self.solver(nlp, M)
+    r = S(x0=[0, 0, 1, 0, 0, 0], ubx=[2.5, inf, inf, inf, inf, inf], lbg=-10, ubg=5)
+    self.assertTrue(S.stats()["success"])
+    self.checkarray(r["x"][:2], ca.DM([2.5, 2.5]), digits=8)
+    self.checkarray(r["g"], ca.DM(5), digits=8)
+    self.checkarray(r["lam_x"][2:], ca.DM.zeros(4, 1))
+    self.checkarray(M.component(1).minus(r["x"][2:], q_target), ca.DM.zeros(3, 1), digits=8)
+    with self.assertRaisesRegex(Exception, "only allowed on the Euclidean entries"):
+      S(x0=[0, 0, 1, 0, 0, 0], ubx=[inf, inf, 2, inf, inf, inf])
+
+  def test_ocp(self):
+    nlp, M, args = attitude_ocp()
+    S = self.solver(nlp, M, tol_pr=1e-10, tol_du=1e-10)
+    r = S(**args)
+    self.assertTrue(S.stats()["success"])
+    x = r["x"]
+    # all quaternions are unit quaternions
+    for k in range(11):
+      self.checkarray(ca.norm_2(x[10*k:10*k+4]), ca.DM(1), digits=10)
+    if ca.has_nlpsol("ipopt"):
+      Si = ca.nlpsol("S", "ipopt", nlp, {"x_manifold": M, "manifold_fallback": "embed",
+                                         "ipopt.print_level": 0, "print_time": False,
+                                         "ipopt.sb": "yes", "ipopt.tol": 1e-10})
+      ri = Si(**args)
+      self.checkarray(r["x"], ri["x"], digits=5)
+      self.checkarray(r["f"], ri["f"], digits=4)
+    # Same optimum as sqpmethod on the formulation with explicit unit-norm constraints
+    nlp_e, _, _ = attitude_ocp(native=False)
+    S_e = ca.nlpsol("S", "sqpmethod", nlp_e, dict(SQP_OPTS, tol_pr=1e-10, tol_du=1e-10))
+    r_e = S_e(**args)
+    if S_e.stats()["success"]:
+      self.checkarray(r["f"], r_e["f"], digits=4)
+
+  def test_options(self):
+    nlp, M, args = attitude_ocp(N=6)
+    ref = None
+    for opts in [{}, {"max_iter_ls": 0}, {"second_order_corrections": True},
+                 {"elastic_mode": True}, {"max_iter_ls": 0, "second_order_corrections": True}]:
+      S = self.solver(nlp, M, **opts)
+      r = S(**args)
+      self.assertTrue(S.stats()["success"], str(opts))
+      if ref is None:
+        ref = r["x"]
+      self.checkarray(r["x"], ref, str(opts), digits=5)
+
+  def test_serialize(self):
+    nlp, M, args = attitude_ocp(N=6)
+    S = self.solver(nlp, M)
+    S2 = ca.Function.deserialize(S.serialize())
+    r, r2 = S(**args), S2(**args)
+    self.assertTrue(S2.stats()["success"])
+    self.checkarray(r["x"], r2["x"], digits=12)
+
+  def test_nested_product(self):
+    # Euclidean entries inside nested products keep their bounds
+    SO3 = ca.Manifold.SO3()
+    M = ca.Manifold.product([ca.Manifold.product([SO3, ca.Manifold.Euclidean(2)]),
+                             ca.Manifold.Euclidean(1)])
+    x = ca.SX.sym("x", 7)
+    q_target = SO3.exp(ca.DM([0.2, 0.1, -0.3]))
+    f = ca.sumsqr(SO3.minus(q_target, x[:4])) + ca.sumsqr(x[4:] - ca.DM([1, 2, 3]))
+    S = self.solver({"x": x, "f": f}, M)
+    r = S(x0=[1, 0, 0, 0, 0, 0, 0], lbx=[-inf]*4 + [-inf, -inf, -inf], ubx=[inf]*4 + [0.5, inf, 2])
+    self.checkarray(r["x"][4:], ca.DM([0.5, 2, 2]), digits=8)
+    self.checkarray(SO3.minus(r["x"][:4], q_target), ca.DM.zeros(3, 1), digits=8)
+
+  def test_sphere(self):
+    from manifold import sphere_functions
+    retract, minus, project = sphere_functions()
+    S2 = ca.Manifold("S2", retract, minus, {"project": project})
+    x = ca.SX.sym("x", 3)
+    a = ca.DM([1, -2, 2])
+    S = self.solver({"x": x, "f": -ca.dot(a, x)}, S2)
+    r = S(x0=[0.1, 0, 1])
+    self.assertTrue(S.stats()["success"])
+    self.checkarray(r["x"], a/3, digits=8)
+
+  def test_partially_euclidean(self):
+    x = ca.SX.sym("x", 2)
+    y = ca.SX.sym("y", 2)
+    dx = ca.SX.sym("dx", 2)
+    M = ca.Manifold("half", ca.Function("r", [x, dx], [x + dx]),
+                    ca.Function("m", [y, x], [y - x]), {"euclidean_mask": [True, False]})
+    with self.assertRaisesRegex(Exception, "neither Euclidean nor free of Euclidean"):
+      self.solver({"x": x, "f": ca.sumsqr(x)}, M)
+
+
 if __name__ == '__main__':
     unittest.main()
