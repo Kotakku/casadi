@@ -84,6 +84,7 @@ namespace casadi {
   class MX;
   template<class T> class Matrix;
   class Function;
+  class Manifold;
   class Sparsity;
   class CodeGenerator;
   class NlpBuilder;

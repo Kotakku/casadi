@@ -1008,7 +1008,15 @@ def type_programs(layouts, parents, functions, mx, sx, generic, ops, plugins):
         select('importer_type', {'DllLibrary':body('ImporterInternal')})]}
     types['Resource']={'shared':True,'body':[{'op':'version','name':'ResourceInternal','value':1},
         field('ResourceInternal::type','std::string','resource_type'),select('resource_type',resources)]}
-    for name, tag in {'Function':'F','Sparsity':'S','Slice':'S','SXElem':'E','MX':'X','GenericType':'G','Resource':'R','Linsol':'L'}.items():
+    manifolds={cls:body(cls if cls+'::serialize_body' in layouts else 'ManifoldInternal')
+               for cls in ['EuclideanManifold','SO2Manifold','SO3Manifold','SE2Manifold',
+                           'SE3Manifold','ProductManifold','CustomManifold']}
+    types['Manifold']={'shared':True,'body':[field('Manifold::null','bool','null'),
+        {'op':'if','condition':'!null','body':[
+            {'op':'version','name':'Manifold','value':1},
+            field('Manifold::type','std::string','manifold_type'),
+            select('manifold_type',manifolds)]}]}
+    for name, tag in {'Function':'F','Sparsity':'S','Slice':'S','SXElem':'E','MX':'X','GenericType':'G','Resource':'R','Linsol':'L','Manifold':'Y'}.items():
         types[name]['decoration'] = tag
     return types
 

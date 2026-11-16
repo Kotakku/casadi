@@ -158,7 +158,7 @@
       1
     ],
     "Nlpsol": [
-      6
+      7
     ],
     "OnnxFunction": [
       2
@@ -558,40 +558,56 @@
       "Nlpsol::detect_simple_bounds_is_simple": [
         3,
         5,
-        6
+        6,
+        7
       ],
       "Nlpsol::detect_simple_bounds_parts": [
         3,
         5,
-        6
+        6,
+        7
       ],
       "Nlpsol::detect_simple_bounds_target_x": [
         3,
         5,
-        6
+        6,
+        7
       ],
       "Nlpsol::equality": [
         5,
-        6
+        6,
+        7
       ],
       "Nlpsol::error_on_fail": [
         1,
         2
       ],
+      "Nlpsol::manifold_fallback": [
+        7
+      ],
+      "Nlpsol::manifold_n_embed": [
+        7
+      ],
       "Nlpsol::sens_force_equality": [
-        6
+        6,
+        7
       ],
       "Nlpsol::sens_linsol": [
         2,
         3,
         5,
-        6
+        6,
+        7
       ],
       "Nlpsol::sens_linsol_options": [
         2,
         3,
         5,
-        6
+        6,
+        7
+      ],
+      "Nlpsol::x_manifold": [
+        7
       ]
     },
     "OnnxFunction": {
@@ -1081,7 +1097,8 @@
       3,
       4,
       5,
-      6
+      6,
+      7
     ],
     "OnnxFunction": [
       1,
@@ -7715,7 +7732,7 @@
           "minimum": 1,
           "name": "Nlpsol",
           "op": "version",
-          "value": 6
+          "value": 7
         },
         {
           "name": "Nlpsol::nx",
@@ -7955,6 +7972,37 @@
             [
               "literal",
               3
+            ]
+          ],
+          "op": "if"
+        },
+        {
+          "body": [
+            {
+              "name": "Nlpsol::x_manifold",
+              "op": "field",
+              "type": "Manifold"
+            },
+            {
+              "name": "Nlpsol::manifold_fallback",
+              "op": "field",
+              "type": "std::string"
+            },
+            {
+              "name": "Nlpsol::manifold_n_embed",
+              "op": "field",
+              "type": "casadi_int"
+            }
+          ],
+          "condition": [
+            "greater_equal",
+            [
+              "version",
+              "Nlpsol"
+            ],
+            [
+              "literal",
+              7
             ]
           ],
           "op": "if"
@@ -12102,6 +12150,13 @@
                   "type": "casadi_int"
                 }
               ],
+              "20": [
+                {
+                  "name": "GenericType::d",
+                  "op": "field",
+                  "type": "Manifold"
+                }
+              ],
               "3": [
                 {
                   "name": "GenericType::d",
@@ -13495,6 +13550,90 @@
           }
         ],
         "decoration": "X",
+        "shared": true
+      },
+      "Manifold": {
+        "body": [
+          {
+            "name": "Manifold::null",
+            "op": "field",
+            "type": "bool"
+          },
+          {
+            "body": [
+              {
+                "name": "Manifold",
+                "op": "version",
+                "value": 1
+              },
+              {
+                "name": "Manifold::type",
+                "op": "field",
+                "type": "std::string"
+              },
+              {
+                "cases": {
+                  "CustomManifold": [
+                    {
+                      "layout": "CustomManifold::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "EuclideanManifold": [
+                    {
+                      "layout": "EuclideanManifold::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "ProductManifold": [
+                    {
+                      "layout": "ProductManifold::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SE2Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SE3Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SO2Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ],
+                  "SO3Manifold": [
+                    {
+                      "layout": "ManifoldInternal::serialize_body",
+                      "op": "call"
+                    }
+                  ]
+                },
+                "op": "select",
+                "value": [
+                  "field",
+                  "Manifold::type"
+                ]
+              }
+            ],
+            "condition": [
+              "not",
+              [
+                "field",
+                "Manifold::null"
+              ]
+            ],
+            "op": "if"
+          }
+        ],
+        "decoration": "Y",
         "shared": true
       },
       "Resource": {

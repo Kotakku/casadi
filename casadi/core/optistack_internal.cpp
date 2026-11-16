@@ -23,6 +23,7 @@
  */
 
 #include "optistack_internal.hpp"
+#include <algorithm>
 #include "nlpsol.hpp"
 #include "conic.hpp"
 #include "function_internal.hpp"
@@ -310,6 +311,123 @@ MX OptiNode::variable(casadi_int n, casadi_int m, const std::string& attribute) 
 
   set_meta(symbol, meta_data);
   return ret;
+}
+
+MX OptiNode::variable(const Manifold& M, casadi_int m) {
+  casadi_assert(!M.is_null(), "Manifold is null.");
+  casadi_assert(m>=1, "Number of columns must be positive, got " + str(m) + ".");
+
+  // Prepare metadata
+  MetaVar meta_data;
+  meta_data.attribute = "full";
+  meta_data.n = M.nx();
+  meta_data.m = m;
+  meta_data.type = OPTI_VAR;
+  meta_data.count = count_++;
+  meta_data.i = count_var_++;
+  meta_data.domain = OPTI_DOMAIN_REAL;
+  meta_data.extra["manifold"] = M;
+
+  MX symbol = MX::sym(name_prefix() + "x_" + str(count_var_), M.nx(), m);
+
+  // Store the symbol; preventing it from going ut of scope
+  symbols_.push_back(symbol);
+  // Default initial guess: identity element in every column
+  store_initial_[OPTI_VAR].push_back(repmat(M.identity(), 1, m));
+  store_latest_[OPTI_VAR].push_back(DM::nan(symbol.sparsity()));
+  store_linear_scale_[OPTI_VAR].push_back(DM::ones(symbol.sparsity()));
+  store_linear_scale_offset_[OPTI_VAR].push_back(DM::zeros(symbol.sparsity()));
+
+  set_meta(symbol, meta_data);
+  return symbol;
+}
+
+Manifold OptiNode::variable_manifold(const MX& symbol) const {
+  const MetaVar& m = meta(symbol);
+  if (m.type!=OPTI_VAR) return Manifold();
+  auto it = m.extra.find("manifold");
+  return it==m.extra.end() ? Manifold() : it->second.to_manifold();
+}
+
+// Leaves of a (possibly nested) product manifold, with their ambient offsets
+// Note: bake_manifold runs inside bake, so it must not call describe (which bakes)
+static void opti_manifold_leaves(const Manifold& M, casadi_int offset,
+                                 std::vector<std::pair<Manifold, casadi_int> >& leaves) {
+  if (M.n_components()==1 && M.component(0).get()==M.get()) {
+    leaves.push_back({M, offset});
+    return;
+  }
+  std::vector<casadi_int> off = M.offsets();
+  for (casadi_int i=0; i<M.n_components(); ++i) {
+    opti_manifold_leaves(M.component(i), offset + off[i], leaves);
+  }
+}
+
+void OptiNode::bake_manifold(const std::vector<MX>& x) {
+  // Product manifold in the order of the decision vector
+  std::vector<Manifold> comp;
+  casadi_int n_euclidean = 0;
+  bool any = false;
+  for (const MX& v : x) {
+    Manifold M = variable_manifold(v);
+    if (M.is_null()) {
+      n_euclidean += v.nnz();
+      continue;
+    }
+    any = true;
+    if (n_euclidean>0) comp.push_back(Manifold::Euclidean(n_euclidean));
+    n_euclidean = 0;
+    for (casadi_int j=0; j<meta(v).m; ++j) comp.push_back(M);
+    // Linear scaling would leave the manifold
+    casadi_int i = meta(v).i;
+    casadi_assert(
+      static_cast<double>(norm_inf(store_linear_scale_[OPTI_VAR][i]-1))==0 &&
+      static_cast<double>(norm_inf(store_linear_scale_offset_[OPTI_VAR][i]))==0,
+      "Linear scaling (set_linear_scale) is not supported for manifold variable '"
+      + v.name() + "'.");
+  }
+  if (n_euclidean>0) comp.push_back(Manifold::Euclidean(n_euclidean));
+  x_manifold_ = any ? Manifold::product(comp) : Manifold();
+  if (!any) return;
+
+  // Reject equalities between all ambient coordinates of a non-Euclidean element
+  for (const MX& g : g_) {
+    if (!g.is_op(OP_EQ)) continue;
+    for (casadi_int side=0; side<2; ++side) {
+      MX e = g.dep(side);
+      if (e.is_constant()) continue;
+      std::vector<MX> s = symvar(e);
+      if (s.size()!=1) continue;
+      Manifold M = variable_manifold(s[0]);
+      if (M.is_null()) continue;
+      // Each entry of the side depends on a single entry of the variable
+      Sparsity sp = jacobian_sparsity(vec(e), s[0]);
+      std::vector<casadi_int> nz_per_row(sp.size1(), 0);
+      std::vector<casadi_int> row = sp.get_row();
+      for (casadi_int r : row) nz_per_row[r]++;
+      if (std::any_of(nz_per_row.begin(), nz_per_row.end(),
+                      [](casadi_int k) { return k!=1;})) continue;
+      std::vector<bool> covered(s[0].nnz(), false);
+      std::vector<casadi_int> col = sp.get_col();
+      for (casadi_int c : col) covered[c] = true;
+      // Non-Euclidean leaves of one element
+      std::vector<std::pair<Manifold, casadi_int> > leaves;
+      opti_manifold_leaves(M, 0, leaves);
+      for (casadi_int j=0; j<meta(s[0]).m; ++j) {
+        for (auto&& l : leaves) {
+          if (l.first.is_euclidean()) continue;
+          casadi_int start = j*M.nx() + l.second;
+          bool all = true;
+          for (casadi_int k=0; k<l.first.nx() && all; ++k) all = covered[start+k];
+          casadi_assert(!all,
+            "Constraint equates all " + str(l.first.nx()) + " ambient coordinates of an element "
+            "of " + str(l.first) + " (variable '" + s[0].name() + "'), which has only "
+            + str(l.first.ndx()) + " degrees of freedom. Write the equality in the tangent "
+            "space instead, e.g. M.minus(a, b) == 0.");
+        }
+      }
+    }
+  }
 }
 
 MX OptiNode::variable(const MX& symbol, const std::string& attribute) {
@@ -775,6 +893,9 @@ void OptiNode::bake() {
   for (const MX& e : x) {
     discrete_.insert(discrete_.end(), e.nnz(), meta(e).domain == OPTI_DOMAIN_INTEGER);
   }
+
+  // Manifold of the decision variables
+  bake_manifold(x);
 
   nlp_["f"] = f_;
   nlp_unscaled_["f"] = f_;
@@ -1309,6 +1430,14 @@ Function OptiNode::solver_construct(bool callback) {
 
   if (solver_options_all.find("discrete")==solver_options_all.end()) {
     solver_options_all["discrete"] = discrete_;
+  }
+
+  if (!x_manifold_.is_null()) {
+    casadi_assert(problem_type_!="conic",
+      "Manifold variables are not supported for conic problems.");
+    casadi_assert(solver_options_all.find("x_manifold")==solver_options_all.end(),
+      "Option 'x_manifold' is set by Opti from the manifold variables; do not pass it.");
+    solver_options_all["x_manifold"] = x_manifold_;
   }
 
   Dict opts = solver_options_all;

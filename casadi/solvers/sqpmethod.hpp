@@ -59,6 +59,9 @@ namespace casadi {
 
     /// Iteration count
     int iter_count;
+
+    /// Next iterate when stepping along a manifold (option x_manifold)
+    double* x_next;
   };
 
   /** \brief  \pluginbrief{Nlpsol,sqpmethod}
@@ -108,6 +111,24 @@ namespace casadi {
 
     // Solve the NLP
     int solve(void* mem) const override;
+
+    /// Native support for option x_manifold
+    bool supports_manifold() const override { return true;}
+
+    /** \brief Set up the tangent-space functions for option x_manifold
+
+        The QP is formulated in "padded" tangent coordinates d (length nx):
+        the tangent coordinates of each leaf manifold occupy the first entries
+        of its block of x, the remaining entries are unused. The derivatives
+        are those of f(retract(x, P d)) and g(retract(x, P d)) at d = 0, with
+        0.5*|d_unused|^2 added to the objective so that the QP stays regular.
+        Euclidean leaves keep their indices, hence simple bounds carry over.
+    */
+    void init_manifold_functions();
+
+    /// x_new = x + t*dx, or retract(x, t*P dx) with option x_manifold
+    int take_step(SqpmethodMemory* m, const double* x, double t, const double* dx,
+                  double* x_new) const;
 
     // Memory structure
     casadi_sqpmethod_prob<double> p_;

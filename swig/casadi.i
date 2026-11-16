@@ -1863,6 +1863,7 @@ namespace std {
           || to_generic<std::vector<std::vector<double> > >(p, m)
           || to_generic<casadi::Function>(p, m)
           || to_generic<std::vector<casadi::Function> >(p, m)
+          || to_generic<casadi::Manifold>(p, m)
           || to_generic<casadi::GenericType::Dict>(p, m)
           || to_generic<std::vector<casadi::GenericType::Dict> >(p, m)
           || to_generic<std::vector<std::vector<casadi::GenericType> > >(p, m)
@@ -1896,6 +1897,7 @@ namespace std {
       case OT_VECTOR: return from_tmp(a->as_vector());
       case OT_FUNCTION: return from_tmp(a->as_function());
       case OT_FUNCTIONVECTOR: return from_tmp(a->as_function_vector());
+      case OT_MANIFOLD: return from_tmp(a->as_manifold());
 #ifdef SWIGPYTHON
       case OT_NULL:
       case OT_VOIDPTR:

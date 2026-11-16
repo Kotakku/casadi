@@ -278,6 +278,32 @@ namespace casadi {
     if (nlp.has_free()) {
       casadi_error("Cannot create '" + name + "' since " + str(nlp.get_free()) + " are free.");
     }
+    // Optimization on a manifold without native solver support
+    auto it = opts.find("x_manifold");
+    if (it!=opts.end() && get_from_dict(opts, "manifold_fallback", std::string("error"))=="embed"
+        && !get_from_dict(opts, "manifold_n_embed", casadi_int(0))) {
+      Manifold M = it->second;
+      casadi_assert(!M.is_null(), "Option 'x_manifold' is null.");
+      casadi_assert(M.nx()==nlp.nnz_in(NL_X),
+        "Option 'x_manifold': manifold " + str(M) + " has nx = " + str(M.nx())
+        + ", but the NLP has " + str(nlp.nnz_in(NL_X)) + " decision variables.");
+      // Does the plugin support manifolds natively?
+      Nlpsol* probe = Nlpsol::instantiate(name, solver, nlp);
+      bool native = probe->supports_manifold();
+      delete probe;
+      if (!native) {
+        // Append the embedding constraints c(x) == 0 to g
+        MX x = MX::sym("x", nlp.sparsity_in(NL_X));
+        MX p = MX::sym("p", nlp.sparsity_in(NL_P));
+        std::vector<MX> fg = nlp(std::vector<MX>{x, p});
+        MX c = M.constraint(vec(x));
+        Function nlp_embed("nlp", {x, p}, {fg.at(NL_F), vertcat(fg.at(NL_G), c)},
+                           NL_INPUTS, NL_OUTPUTS);
+        Dict embed_opts = opts;
+        embed_opts["manifold_n_embed"] = c.size1();
+        return Function::create(Nlpsol::instantiate(name, solver, nlp_embed), embed_opts);
+      }
+    }
     return Function::create(Nlpsol::instantiate(name, solver, nlp), opts);
   }
 
@@ -366,6 +392,8 @@ namespace casadi {
     no_nlp_grad_ = false;
     error_on_fail_ = false;
     sens_linsol_ = "qr";
+    manifold_fallback_ = "error";
+    manifold_n_embed_ = 0;
   }
 
   Nlpsol::~Nlpsol() {
@@ -403,7 +431,10 @@ namespace casadi {
       return oracle_.sparsity_in(NL_X);
     case NLPSOL_LAM_G:
     case NLPSOL_G:
-      if (detect_simple_bounds_is_simple_.empty()) {
+      if (manifold_n_embed_>0) {
+        // Embedding constraints are hidden from the user
+        return Sparsity::dense(oracle_.sparsity_out(NL_G).nnz() - manifold_n_embed_);
+      } else if (detect_simple_bounds_is_simple_.empty()) {
         return oracle_.sparsity_out(NL_G);
       } else {
         return Sparsity::dense(detect_simple_bounds_is_simple_.size());
@@ -502,6 +533,21 @@ namespace casadi {
         "For internal use only."}},
       {"detect_simple_bounds_target_x",
        {OT_INTVECTOR,
+        "For internal use only."}},
+      {"x_manifold",
+       {OT_MANIFOLD,
+        "Manifold of the decision variables x (see Manifold). The iterate x and "
+        "the initial guess x0 are ambient vectors; solvers with native support "
+        "work in the tangent space and update x with Manifold::retract. "
+        "Simple bounds are only allowed on the Euclidean entries "
+        "(Manifold::euclidean_mask); lam_x is zero on the other entries."}},
+      {"manifold_fallback",
+       {OT_STRING,
+        "What to do when the solver has no native support for x_manifold: "
+        "'error' (default) or 'embed' (append the embedding constraints "
+        "Manifold::constraint(x) == 0 to g; they are hidden from g and lam_g)."}},
+      {"manifold_n_embed",
+       {OT_INT,
         "For internal use only."}}
      }
   };
@@ -521,6 +567,12 @@ namespace casadi {
         detect_simple_bounds_parts_ = op.second;
       } else if (op.first=="detect_simple_bounds_target_x") {
         detect_simple_bounds_target_x_ = op.second;
+      } else if (op.first=="x_manifold") {
+        x_manifold_ = op.second;
+      } else if (op.first=="manifold_fallback") {
+        manifold_fallback_ = op.second.to_string();
+      } else if (op.first=="manifold_n_embed") {
+        manifold_n_embed_ = op.second;
       }
     }
 
@@ -625,9 +677,35 @@ namespace casadi {
       }
     }
     if (!equality_.empty()) {
-      casadi_assert(equality_.size()==ng_, "\"equality\" option has wrong length. "
-                                           "Expected " + str(ng_) + " elements, but got " +
+      casadi_assert(equality_.size()==ng_user(), "\"equality\" option has wrong length. "
+                                           "Expected " + str(ng_user()) + " elements, but got " +
                                             str(equality_.size()) + " instead.");
+      if (manifold_n_embed_>0) {
+        // Embedding constraints are equalities
+        equality_.resize(ng_, true);
+      }
+    }
+
+    // Optimization on manifolds
+    casadi_assert(manifold_fallback_=="error" || manifold_fallback_=="embed",
+      "Option 'manifold_fallback' must be 'error' or 'embed', got '" + manifold_fallback_ + "'.");
+    if (!x_manifold_.is_null()) {
+      casadi_assert(x_manifold_.nx()==nx_,
+        "Option 'x_manifold': manifold " + str(x_manifold_) + " has nx = "
+        + str(x_manifold_.nx()) + ", but the NLP has " + str(nx_) + " decision variables.");
+      casadi_assert(detect_simple_bounds_is_simple_.empty(),
+        "Option 'x_manifold' cannot be combined with 'detect_simple_bounds'.");
+      casadi_assert(!mi_, "Option 'x_manifold' cannot be combined with discrete variables.");
+      if (!supports_manifold() && manifold_fallback_=="error") {
+        casadi_error("Option 'x_manifold': solver '" + class_name() + "' has no native "
+          "support for optimization on manifolds. Set 'manifold_fallback' to 'embed' to "
+          "add the embedding constraints of the manifold to g, or use a solver with "
+          "native support.");
+      }
+      init_manifold();
+      alloc(manifold_project_);
+    } else {
+      casadi_assert(manifold_n_embed_==0, "Inconsistent option 'manifold_n_embed'.");
     }
 
     set_nlpsol_prob();
@@ -813,6 +891,19 @@ namespace casadi {
 
     // Set initial guess
     casadi_copy(d_nlp->x0, nx_, d_nlp->z);
+    if (!x_manifold_.is_null()) {
+      // Project the initial guess onto the manifold (default: identity element)
+      m->arg[0] = d_nlp->x0 ? d_nlp->x0 : get_ptr(manifold_identity_);
+      m->res[0] = d_nlp->z;
+      if (manifold_project_(m->arg, m->res, m->iw, m->w)) return 1;
+      for (casadi_int i=0; i<nx_; ++i) {
+        casadi_assert(std::isfinite(d_nlp->z[i]),
+          "Option 'x_manifold': the initial guess cannot be projected onto "
+          + str(x_manifold_) + " (entry " + str(i) + " of the projection is "
+          + str(d_nlp->z[i]) + "). Provide an x0 on or near the manifold, "
+          "e.g. Manifold::identity().");
+      }
+    }
 
     // Read simple bounds and multiplier guesses
     casadi_copy(d_nlp->lbx, nx_, d_nlp->lbz);
@@ -821,9 +912,13 @@ namespace casadi {
 
     if (p_nlp->detect_bounds.ng==0) {
       // Read constraint bounds and multiplier guesses
-      casadi_copy(d_nlp->lbg, ng_, d_nlp->lbz+nx_);
-      casadi_copy(d_nlp->ubg, ng_, d_nlp->ubz+nx_);
-      casadi_copy(d_nlp->lam_g0, ng_, d_nlp->lam+nx_);
+      casadi_copy(d_nlp->lbg, ng_user(), d_nlp->lbz+nx_);
+      casadi_copy(d_nlp->ubg, ng_user(), d_nlp->ubz+nx_);
+      casadi_copy(d_nlp->lam_g0, ng_user(), d_nlp->lam+nx_);
+      // Embedding constraints of the manifold: c(x) == 0
+      casadi_fill(d_nlp->lbz+nx_+ng_user(), manifold_n_embed_, 0.);
+      casadi_fill(d_nlp->ubz+nx_+ng_user(), manifold_n_embed_, 0.);
+      casadi_fill(d_nlp->lam+nx_+ng_user(), manifold_n_embed_, 0.);
     } else {
       if (casadi_nlpsol_detect_bounds_before(d_nlp)) return 1;
     }
@@ -834,6 +929,18 @@ namespace casadi {
     // Reset f, g
     d_nlp->objective = nan;
     casadi_fill(d_nlp->z + nx_, ng_, nan);
+
+    // Simple bounds are only allowed on Euclidean entries of a manifold
+    if (!x_manifold_.is_null()) {
+      const double inf = std::numeric_limits<double>::infinity();
+      for (casadi_int i=0; i<nx_; ++i) {
+        if (manifold_mask_[i]) continue;
+        casadi_assert(d_nlp->lbz[i]==-inf && d_nlp->ubz[i]==inf,
+          "Option 'x_manifold': simple bounds are only allowed on the Euclidean entries of "
+          + str(x_manifold_) + ", but LBX[" + str(i) + "] = " + str(d_nlp->lbz[i])
+          + " and UBX[" + str(i) + "] = " + str(d_nlp->ubz[i]) + ".");
+      }
+    }
 
     // Check the provided inputs
     check_inputs(m);
@@ -870,10 +977,17 @@ namespace casadi {
     // Get optimal solution
     casadi_copy(d_nlp->z, nx_, d_nlp->x);
 
+    // No simple bounds act on non-Euclidean entries of a manifold
+    if (!x_manifold_.is_null()) {
+      for (casadi_int i=0; i<nx_; ++i) {
+        if (!manifold_mask_[i]) d_nlp->lam[i] = 0;
+      }
+    }
+
     if (p_nlp->detect_bounds.ng==0) {
-      casadi_copy(d_nlp->z + nx_, ng_, d_nlp->g);
+      casadi_copy(d_nlp->z + nx_, ng_user(), d_nlp->g);
       casadi_copy(d_nlp->lam, nx_, d_nlp->lam_x);
-      casadi_copy(d_nlp->lam + nx_, ng_, d_nlp->lam_g);
+      casadi_copy(d_nlp->lam + nx_, ng_user(), d_nlp->lam_g);
     } else {
       if (casadi_nlpsol_detect_bounds_after(d_nlp)) return 1;
     }
@@ -973,6 +1087,8 @@ namespace casadi {
               const Dict& opts) const {
     casadi_assert(detect_simple_bounds_is_simple_.empty(),
       "Simple bound detection not compatible with get_forward");
+    casadi_assert(x_manifold_.is_null(),
+      "Parametric sensitivities are not yet supported with option 'x_manifold'");
 
     // Symbolic expression for the input
     std::vector<MX> arg = mx_in(), res = mx_out();
@@ -1093,6 +1209,8 @@ namespace casadi {
               const Dict& opts) const {
     casadi_assert(detect_simple_bounds_is_simple_.empty(),
       "Simple bound detection not compatible with get_reverse");
+    casadi_assert(x_manifold_.is_null(),
+      "Parametric sensitivities are not yet supported with option 'x_manifold'");
 
     // Symbolic expression for the input
     std::vector<MX> arg = mx_in(), res = mx_out();
@@ -1336,6 +1454,8 @@ namespace casadi {
   }
 
   void Nlpsol::codegen_declarations(CodeGenerator& g) const {
+    casadi_assert(x_manifold_.is_null(),
+      "Code generation is not yet supported with option 'x_manifold'.");
     g.add_auxiliary(CodeGenerator::AUX_FILL);
     g.add_auxiliary(CodeGenerator::AUX_INF);
     if (calc_f_ || calc_g_ || calc_lam_x_ || calc_lam_p_)
@@ -1399,7 +1519,7 @@ namespace casadi {
   void Nlpsol::serialize_body(SerializingStream &s) const {
     OracleFunction::serialize_body(s);
 
-    s.version("Nlpsol", 6);
+    s.version("Nlpsol", 7);
     s.pack("Nlpsol::nx", nx_);
     s.pack("Nlpsol::ng", ng_);
     s.pack("Nlpsol::np", np_);
@@ -1425,6 +1545,9 @@ namespace casadi {
     s.pack("Nlpsol::detect_simple_bounds_is_simple", detect_simple_bounds_is_simple_);
     s.pack("Nlpsol::detect_simple_bounds_parts", detect_simple_bounds_parts_);
     s.pack("Nlpsol::detect_simple_bounds_target_x", detect_simple_bounds_target_x_);
+    s.pack("Nlpsol::x_manifold", x_manifold_);
+    s.pack("Nlpsol::manifold_fallback", manifold_fallback_);
+    s.pack("Nlpsol::manifold_n_embed", manifold_n_embed_);
   }
 
   void Nlpsol::serialize_type(SerializingStream &s) const {
@@ -1437,7 +1560,7 @@ namespace casadi {
   }
 
   Nlpsol::Nlpsol(DeserializingStream & s) : OracleFunction(s) {
-    int version = s.version("Nlpsol", 1, 6);
+    int version = s.version("Nlpsol", 1, 7);
     s.unpack("Nlpsol::nx", nx_);
     s.unpack("Nlpsol::ng", ng_);
     s.unpack("Nlpsol::np", np_);
@@ -1487,7 +1610,22 @@ namespace casadi {
         detect_simple_bounds_target_g_.push_back(i);
       }
     }
+    if (version>=7) {
+      s.unpack("Nlpsol::x_manifold", x_manifold_);
+      s.unpack("Nlpsol::manifold_fallback", manifold_fallback_);
+      s.unpack("Nlpsol::manifold_n_embed", manifold_n_embed_);
+    } else {
+      manifold_fallback_ = "error";
+      manifold_n_embed_ = 0;
+    }
+    if (!x_manifold_.is_null()) init_manifold();
     set_nlpsol_prob();
+  }
+
+  void Nlpsol::init_manifold() {
+    manifold_mask_ = x_manifold_.euclidean_mask();
+    manifold_project_ = x_manifold_.get_function("project");
+    manifold_identity_ = x_manifold_.identity().nonzeros();
   }
 
 } // namespace casadi
