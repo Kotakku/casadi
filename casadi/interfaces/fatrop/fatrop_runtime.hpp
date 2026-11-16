@@ -77,6 +77,66 @@ void casadi_fatrop_write_primal_data(const double* x, T1* primal_data, const str
   }
 }
 
+// SYMBOL "fatrop_write_tangent_data"
+template<typename T1>
+void casadi_fatrop_write_tangent_data(const double* x, T1* tangent_data, const struct FatropOcpCDims *s) {
+  int k;
+  for (k=0;k<s->K;++k) {
+    casadi_copy(x+s->nx_tan[k]+s->ux_tan_offs[k], s->nu_tan[k], tangent_data+s->ux_tan_offs[k]);
+    casadi_copy(x+s->ux_tan_offs[k], s->nx_tan[k], tangent_data+s->ux_tan_offs[k]+s->nu_tan[k]);
+  }
+}
+
+// SYMBOL "fatrop_read_tangent_data"
+template<typename T1>
+void casadi_fatrop_read_tangent_data(const double* tangent_data, T1* x, const struct FatropOcpCDims *s) {
+  int k;
+  for (k=0;k<s->K;++k) {
+    casadi_copy(tangent_data+s->ux_tan_offs[k], s->nu_tan[k], x+s->nx_tan[k]+s->ux_tan_offs[k]);
+    casadi_copy(tangent_data+s->ux_tan_offs[k]+s->nu_tan[k], s->nx_tan[k], x+s->ux_tan_offs[k]);
+  }
+}
+
+// SYMBOL "fatrop_inv"
+// Inverse of a dense n-by-n column-major matrix by Gauss-Jordan elimination with partial
+// pivoting. A is overwritten. Returns 1 if the matrix is singular.
+template<typename T1>
+int casadi_fatrop_inv(casadi_int n, T1* A, T1* Ainv) {
+  casadi_int i, j, c, piv;
+  T1 t, f;
+  for (j=0;j<n;++j) {
+    for (i=0;i<n;++i) Ainv[i+j*n] = i==j ? 1 : 0;
+  }
+  for (c=0;c<n;++c) {
+    piv = c;
+    for (i=c+1;i<n;++i) {
+      if (fabs(A[i+c*n])>fabs(A[piv+c*n])) piv = i;
+    }
+    if (A[piv+c*n]==0) return 1;
+    if (piv!=c) {
+      for (j=0;j<n;++j) {
+        t = A[c+j*n]; A[c+j*n] = A[piv+j*n]; A[piv+j*n] = t;
+        t = Ainv[c+j*n]; Ainv[c+j*n] = Ainv[piv+j*n]; Ainv[piv+j*n] = t;
+      }
+    }
+    f = 1/A[c+c*n];
+    for (j=0;j<n;++j) {
+      A[c+j*n] *= f;
+      Ainv[c+j*n] *= f;
+    }
+    for (i=0;i<n;++i) {
+      if (i==c) continue;
+      f = A[i+c*n];
+      if (f==0) continue;
+      for (j=0;j<n;++j) {
+        A[i+j*n] -= f*A[c+j*n];
+        Ainv[i+j*n] -= f*Ainv[c+j*n];
+      }
+    }
+  }
+  return 0;
+}
+
 // C-REPLACE "casadi_ocp_block" "struct casadi_ocp_block"
 
 // C-REPLACE "OracleCallback" "struct casadi_oracle_callback"
@@ -108,6 +168,17 @@ struct casadi_fatrop_prob {
   OracleCallback nlp_grad_f;
   OracleCallback nlp_f;
   OracleCallback nlp_g;
+
+  // Optimization on a manifold (option x_manifold). nx, nu and the blocks above are tangent
+  // dimensions; nx_amb, nu_amb and amb_off describe the stages of the primal vector x.
+  // Simple bounds only act on Euclidean entries: amb2tan maps them to tangent indices.
+  int manifold;
+  const casadi_int *nx_amb, *nu_amb, *amb_off, *amb2tan;
+  // Offsets of the normalization matrices M_k (nx[k+1]-by-nx[k+1]) of the dynamics rows
+  const casadi_int *M_offsets;
+  casadi_int nt; // tangent dimension
+  // (x, dx, t) -> retract(x, t*dx)
+  OracleCallback nlp_step;
 
   FatropOcpCWrite write;
   FatropOcpCFlush flush;
@@ -164,6 +235,11 @@ struct casadi_fatrop_data {
 
   T1 *pv, *x, *a, *g, *h, *lam;
 
+  // Optimization on a manifold: normalization matrices of the dynamics rows, M_k = D_k^-1
+  // where D_k is the Jacobian of the dynamics rows of stage k w.r.t. the tangent of x_{k+1}
+  T1 *M, *Mw, *dx, *xn;
+  int M_valid;
+
   struct blasfeo_dvec v, r;
   struct blasfeo_dmat R;
 
@@ -196,6 +272,54 @@ void casadi_fatrop_free_mem(casadi_fatrop_data<T1>* d) {
 // C-REPLACE "casadi_error" "//casadi_error"
 
 // SYMBOL "fatrop_full_eval_contr_viol"
+// SYMBOL "fatrop_update_M"
+// Normalization of the dynamics rows on a manifold: M_k = D_k^-1, with D_k the (dense)
+// Jacobian block of the dynamics rows of stage k w.r.t. the tangent of x_{k+1} (in d->I).
+// The normalized rows M_k g_k have the identity on x_{k+1}, as fatrop requires.
+template<typename T1>
+int casadi_fatrop_update_M(casadi_fatrop_data<T1>* d) {
+  casadi_int k, n;
+  const casadi_fatrop_prob<T1>* p = d->prob;
+  for (k=0;k<p->N;++k) {
+    n = p->nx[k+1];
+    casadi_copy(d->I+p->M_offsets[k], n*n, d->Mw);
+    if (casadi_fatrop_inv(n, d->Mw, d->M+p->M_offsets[k])) return 1;
+  }
+  d->M_valid = 1;
+  return 0;
+}
+
+// SYMBOL "fatrop_update_M_at"
+// Evaluate the constraint Jacobian at x and update the normalization matrices
+template<typename T1>
+int casadi_fatrop_update_M_at(casadi_fatrop_data<T1>* d, const T1* x) {
+  const casadi_fatrop_prob<T1>* p = d->prob;
+  casadi_nlpsol_data<T1>* d_nlp = d->nlp;
+  casadi_oracle_data<T1>* d_oracle = d_nlp->oracle;
+  d_oracle->arg[0] = x;
+  d_oracle->arg[1] = d_nlp->p;
+  d_oracle->res[0] = d->g;
+  d_oracle->res[1] = d->a;
+  calc_function(&d->prob->nlp_jac_g, d_oracle);
+  casadi_project(d->a, p->sp_a, d->I, p->Isp, d->pv);
+  return casadi_fatrop_update_M(d);
+}
+
+// SYMBOL "fatrop_apply_M"
+// y = M_k^T x (trans) or y = M_k x, with M_k n-by-n
+template<typename T1>
+void casadi_fatrop_apply_M(casadi_fatrop_data<T1>* d, casadi_int k, const T1* x, T1* y,
+    int trans) {
+  casadi_int i, j, n;
+  const casadi_fatrop_prob<T1>* p = d->prob;
+  const T1* M = d->M+p->M_offsets[k];
+  n = p->nx[k+1];
+  for (i=0;i<n;++i) {
+    y[i] = 0;
+    for (j=0;j<n;++j) y[i] += (trans ? M[j+i*n] : M[i+j*n])*x[j];
+  }
+}
+
 template<typename T1>
 fatrop_int casadi_fatrop_full_eval_contr_viol(const double* primal_data, const double* stageparams_p, const double* globalparams_p,
             double* res, const struct FatropOcpCDims* s, void* user_data) {
@@ -206,6 +330,10 @@ fatrop_int casadi_fatrop_full_eval_contr_viol(const double* primal_data, const d
   casadi_oracle_data<T1>* d_oracle = d_nlp->oracle;
 
   casadi_fatrop_read_primal_data(primal_data, d->x, s);
+  // Normalization matrices are frozen between Jacobian evaluations (consistent line search)
+  if (p->manifold && !d->M_valid) {
+    if (casadi_fatrop_update_M_at(d, d->x)) return 1;
+  }
   d_oracle->arg[0] = d->x;
   d_oracle->arg[1] = d_nlp->p;
   d_oracle->res[0] = d->g;
@@ -234,8 +362,14 @@ fatrop_int casadi_fatrop_full_eval_contr_viol(const double* primal_data, const d
   for (k=0;k<s->K-1;++k) {
     const T1* lbg_k = d_nlp->lbz+p->nlp->nx+p->AB[k].offset_r;
     const T1* g_k = d->g+p->AB[k].offset_r;
-    casadi_copy(lbg_k, p->nx[k+1], res+s->dyn_eq_offs[k]);
-    casadi_axpy(p->nx[k+1], -1.0, g_k, res+s->dyn_eq_offs[k]);
+    if (p->manifold) {
+      casadi_copy(lbg_k, p->nx[k+1], d->Mw);
+      casadi_axpy(p->nx[k+1], -1.0, g_k, d->Mw);
+      casadi_fatrop_apply_M(d, k, d->Mw, res+s->dyn_eq_offs[k], 0);
+    } else {
+      casadi_copy(lbg_k, p->nx[k+1], res+s->dyn_eq_offs[k]);
+      casadi_axpy(p->nx[k+1], -1.0, g_k, res+s->dyn_eq_offs[k]);
+    }
   }
   return 1; //skip
 }
@@ -259,8 +393,8 @@ fatrop_int casadi_fatrop_full_eval_obj_grad(
   d_oracle->res[0] = d->g;
   calc_function(&d->prob->nlp_grad_f, d_oracle);
 
-  casadi_fatrop_write_primal_data(d->g, res, s);
-  casadi_scal(p->nlp->nx, objective_scale, res);
+  casadi_fatrop_write_tangent_data(d->g, res, s);
+  casadi_scal(p->nt, objective_scale, res);
   return 1; // skip
 }
 
@@ -302,8 +436,19 @@ fatrop_int casadi_fatrop_eval_BAbt(const double *states_kp1, const double *input
   blasfeo_pack_tran_dmat(p->nx[k+1], p->nx[k], d->AB+p->AB_offsets[k], p->nx[k+1], res, p->nu[k], 0);
   blasfeo_pack_tran_dmat(p->nx[k+1], p->nu[k], d->AB+p->AB_offsets[k]+p->nx[k]*p->nx[k+1], p->nx[k+1], res, 0, 0);
 
-  for (i=0; i<p->nx[k+1]; ++i) {
-    BLASFEO_DMATEL(res, p->nx[k]+p->nu[k], i) = lbg_k[i]-g_k[i];
+  if (p->manifold) {
+    // Normalized residual M_k (lbg_k - g_k)
+    T1* v = d->Mw;
+    T1* Mv = d->Mw+p->nx[k+1];
+    for (i=0; i<p->nx[k+1]; ++i) v[i] = lbg_k[i]-g_k[i];
+    casadi_fatrop_apply_M(d, k, v, Mv, 0);
+    for (i=0; i<p->nx[k+1]; ++i) {
+      BLASFEO_DMATEL(res, p->nx[k]+p->nu[k], i) = Mv[i];
+    }
+  } else {
+    for (i=0; i<p->nx[k+1]; ++i) {
+      BLASFEO_DMATEL(res, p->nx[k]+p->nu[k], i) = lbg_k[i]-g_k[i];
+    }
   }
 
   return 0;
@@ -376,7 +521,13 @@ fatrop_int casadi_fatrop_full_eval_lag_hess(
     }
   }
   for (k=0;k<s->K-1;++k) {
-    casadi_scaled_copy(-1.0, lam_data+s->dyn_eq_offs[k], p->nx[k+1], d->lam+p->AB[k].offset_r);
+    if (p->manifold) {
+      // Multipliers of the original rows: M_k^T times those of the normalized rows
+      casadi_fatrop_apply_M(d, k, lam_data+s->dyn_eq_offs[k], d->lam+p->AB[k].offset_r, 1);
+      casadi_scal(p->nx[k+1], -1.0, d->lam+p->AB[k].offset_r);
+    } else {
+      casadi_scaled_copy(-1.0, lam_data+s->dyn_eq_offs[k], p->nx[k+1], d->lam+p->AB[k].offset_r);
+    }
   }
 
   d_oracle->arg[0] = d->x;
@@ -397,12 +548,12 @@ fatrop_int casadi_fatrop_full_eval_lag_hess(
   for (k=0;k<s->K;++k) {
     column = d->a_ineq_idx[k+1]-d->a_ineq_idx[k];
     for (i=d->x_ineq_idx[k];i<d->x_ineq_idx[k+1];++i) {
-      d->g[d->x_ineq[i]] += lam_data[s->g_ineq_offs[k]+column];
+      d->g[p->amb2tan[d->x_ineq[i]]] += lam_data[s->g_ineq_offs[k]+column];
       column++;
     }
     column = d->a_eq_idx[k+1]-d->a_eq_idx[k];
     for (i=d->x_eq_idx[k];i<d->x_eq_idx[k+1];++i) {
-      d->g[d->x_eq[i]] += lam_data[s->g_offs[k]+column];
+      d->g[p->amb2tan[d->x_eq[i]]] += lam_data[s->g_offs[k]+column];
       column++;
     }
   }
@@ -460,7 +611,7 @@ fatrop_int casadi_fatrop_eval_Ggt(
     column++;
   }
   for (i=d->x_eq_idx[k];i<d->x_eq_idx[k+1];++i) {
-    int j = d->x_eq[i]-p->CD[k].offset_c;
+    int j = p->amb2tan[d->x_eq[i]]-p->CD[k].offset_c;
     if (j>=p->nx[k]) {
       j -= p->nx[k];
     } else {
@@ -512,7 +663,7 @@ fatrop_int  casadi_fatrop_eval_Ggt_ineq(
     column++;
   }
   for (i=d->x_ineq_idx[k];i<d->x_ineq_idx[k+1];++i) {
-    int j = d->x_ineq[i]-p->CD[k].offset_c;
+    int j = p->amb2tan[d->x_ineq[i]]-p->CD[k].offset_c;
     if (j>=p->nx[k]) {
       j -= p->nx[k];
     } else {
@@ -549,9 +700,28 @@ fatrop_int casadi_fatrop_full_eval_constr_jac(const double* primal_data, const d
   casadi_project(d->a, p->sp_a, d->CD, p->CDsp, d->pv);
   casadi_project(d->a, p->sp_a, d->I, p->Isp, d->pv);
 
-  for (i=0;i<p->Isp[2+p->Isp[1]];++i) {
-    if (d->I[i]!=1.0) {
-      casadi_error("Structure mismatch: gap-closing constraints must be like this: x_{k+1}-F(xk,uk).");
+  if (p->manifold) {
+    // Normalize the dynamics rows: AB_k <- M_k AB_k (the residual is normalized in eval_BAbt)
+    casadi_int r, c, j, n, m;
+    if (casadi_fatrop_update_M(d)) return 1;
+    for (k=0;k<p->N;++k) {
+      T1* AB = d->AB+p->AB_offsets[k];
+      const T1* M = d->M+p->M_offsets[k];
+      n = p->nx[k+1];
+      m = p->nx[k]+p->nu[k];
+      for (c=0;c<m;++c) {
+        for (r=0;r<n;++r) {
+          d->Mw[r+c*n] = 0;
+          for (j=0;j<n;++j) d->Mw[r+c*n] += M[r+j*n]*AB[j+c*n];
+        }
+      }
+      casadi_copy(d->Mw, n*m, AB);
+    }
+  } else {
+    for (i=0;i<p->Isp[2+p->Isp[1]];++i) {
+      if (d->I[i]!=1.0) {
+        casadi_error("Structure mismatch: gap-closing constraints must be like this: x_{k+1}-F(xk,uk).");
+      }
     }
   }
 
@@ -602,8 +772,43 @@ fatrop_int casadi_fatrop_get_nx(const fatrop_int k, void* user_data) {
 
   //printf("nx %lld\n", p->nx[k]);
 
+  if (k==p->N+1) return p->nx_amb[k-1];
+  return p->nx_amb[k];
+}
+
+// SYMBOL "fatrop_get_nx_tangent"
+template<typename T1>
+fatrop_int casadi_fatrop_get_nx_tangent(const fatrop_int k, void* user_data) {
+  casadi_fatrop_data<T1>* d = static_cast< casadi_fatrop_data<T1>* >(user_data);
+  const casadi_fatrop_prob<T1>* p = d->prob;
   if (k==p->N+1) return p->nx[k-1];
   return p->nx[k];
+}
+
+// SYMBOL "fatrop_get_nu_tangent"
+template<typename T1>
+fatrop_int casadi_fatrop_get_nu_tangent(const fatrop_int k, void* user_data) {
+  casadi_fatrop_data<T1>* d = static_cast< casadi_fatrop_data<T1>* >(user_data);
+  const casadi_fatrop_prob<T1>* p = d->prob;
+  return p->nu[k];
+}
+
+// SYMBOL "fatrop_apply_retraction"
+template<typename T1>
+fatrop_int casadi_fatrop_apply_retraction(const double* primal_x, const double* delta_x,
+    double alpha, double* primal_x_next, const struct FatropOcpCDims* s, void* user_data) {
+  casadi_fatrop_data<T1>* d = static_cast< casadi_fatrop_data<T1>* >(user_data);
+  casadi_nlpsol_data<T1>* d_nlp = d->nlp;
+  casadi_oracle_data<T1>* d_oracle = d_nlp->oracle;
+  casadi_fatrop_read_primal_data(primal_x, d->x, s);
+  casadi_fatrop_read_tangent_data(delta_x, d->dx, s);
+  d_oracle->arg[0] = d->x;
+  d_oracle->arg[1] = d->dx;
+  d_oracle->arg[2] = &alpha;
+  d_oracle->res[0] = d->xn;
+  calc_function(&d->prob->nlp_step, d_oracle);
+  casadi_fatrop_write_primal_data(d->xn, primal_x_next, s);
+  return 0;
 }
 
 // SYMBOL "fatrop_get_nu"
@@ -611,7 +816,7 @@ template<typename T1>
 fatrop_int casadi_fatrop_get_nu(const fatrop_int k, void* user_data) {
   casadi_fatrop_data<T1>* d = static_cast< casadi_fatrop_data<T1>* >(user_data);
   const casadi_fatrop_prob<T1>* p = d->prob;
-  return p->nu[k];
+  return p->nu_amb[k];
 }
 
 // SYMBOL "fatrop_get_ng"
@@ -687,7 +892,7 @@ fatrop_int casadi_fatrop_get_initial_xk(double *xk, const fatrop_int k, void* us
   const casadi_fatrop_prob<T1>* p = d->prob;
   casadi_nlpsol_data<T1>* d_nlp = d->nlp;
   //printf("casadi_fatrop_get_initial_xk offset %lld %e\n",p->CD[k].offset_c,d_nlp->z[p->CD[k].offset_c]);
-  casadi_copy(d_nlp->z+p->CD[k].offset_c, p->nx[k], xk);
+  casadi_copy(d_nlp->z+p->amb_off[k], p->nx_amb[k], xk);
 
   return 0;
 }
@@ -698,7 +903,7 @@ fatrop_int casadi_fatrop_get_initial_uk(double *uk, const fatrop_int k, void* us
   casadi_fatrop_data<T1>* d = static_cast< casadi_fatrop_data<T1>* >(user_data);
   const casadi_fatrop_prob<T1>* p = d->prob;
   casadi_nlpsol_data<T1>* d_nlp = d->nlp;
-  casadi_copy(d_nlp->z+p->CD[k].offset_c+p->nx[k], p->nu[k], uk);
+  casadi_copy(d_nlp->z+p->amb_off[k]+p->nx_amb[k], p->nu_amb[k], uk);
   return 0;
 }
 
@@ -734,6 +939,12 @@ void casadi_fatrop_work(const casadi_fatrop_prob<T1>* p, casadi_int* sz_arg, cas
   *sz_iw += p->nlp->nx; // x_eq
   *sz_iw += p->nlp->nx; // x_ineq
 
+  if (p->manifold) {
+    *sz_w += p->M_offsets[p->N]; // M
+    *sz_w += casadi_max(2*p->nx_max*p->nx_max, p->nx_max*(p->nxu_max+1)); // Mw
+    *sz_w += p->nt; // dx
+    *sz_w += p->nlp->nx; // xn
+  }
 }
 
 // SYMBOL "fatrop_set_work"
@@ -773,6 +984,14 @@ void casadi_fatrop_set_work(casadi_fatrop_data<T1>* d, const T1*** arg, T1*** re
   d->x_eq = *iw;  *iw += p->nlp->nx;
   d->x_ineq = *iw; *iw += p->nlp->nx;
 
+  if (p->manifold) {
+    d->M = *w;  *w += p->M_offsets[p->N];
+    d->Mw = *w; *w += casadi_max(2*p->nx_max*p->nx_max, p->nx_max*(p->nxu_max+1));
+    d->dx = *w; *w += p->nt;
+    d->xn = *w; *w += p->nlp->nx;
+  }
+  d->M_valid = 0;
+
   d->pv = *w;
 
   d->arg = *arg;
@@ -782,6 +1001,9 @@ void casadi_fatrop_set_work(casadi_fatrop_data<T1>* d, const T1*** arg, T1*** re
 }
 
 // C-REPLACE "casadi_fatrop_get_nx<T1>" "casadi_fatrop_get_nx"
+// C-REPLACE "casadi_fatrop_get_nx_tangent<T1>" "casadi_fatrop_get_nx_tangent"
+// C-REPLACE "casadi_fatrop_get_nu_tangent<T1>" "casadi_fatrop_get_nu_tangent"
+// C-REPLACE "casadi_fatrop_apply_retraction<T1>" "casadi_fatrop_apply_retraction"
 // C-REPLACE "casadi_fatrop_get_nu<T1>" "casadi_fatrop_get_nu"
 // C-REPLACE "casadi_fatrop_get_ng<T1>" "casadi_fatrop_get_ng"
 // C-REPLACE "casadi_fatrop_get_ng_ineq<T1>" "casadi_fatrop_get_ng_ineq"
@@ -835,6 +1057,17 @@ int casadi_fatrop_presolve(casadi_fatrop_data<T1>* d) {
   ocp_interface->eval_rq = 0; // Computed in full_eval_obj_grad
   ocp_interface->eval_L = 0; // Computed in full_eval_obj
 
+  if (p->manifold) {
+    ocp_interface->get_nx_tangent = casadi_fatrop_get_nx_tangent<T1>;
+    ocp_interface->get_nu_tangent = casadi_fatrop_get_nu_tangent<T1>;
+    ocp_interface->apply_retraction = casadi_fatrop_apply_retraction<T1>;
+  } else {
+    ocp_interface->get_nx_tangent = 0;
+    ocp_interface->get_nu_tangent = 0;
+    ocp_interface->apply_retraction = 0;
+  }
+  d->M_valid = 0;
+
   nx = p_nlp->nx;
 
   d->a_eq_idx[0] = 0;
@@ -858,8 +1091,8 @@ int casadi_fatrop_presolve(casadi_fatrop_data<T1>* d) {
     }
     d->x_eq_idx[k+1] = d->x_eq_idx[k];
     d->x_ineq_idx[k+1] = d->x_ineq_idx[k];
-    start = p->CD[k].offset_c;
-    stop  = p->CD[k].offset_c+p->CD[k].cols;
+    start = p->amb_off[k];
+    stop  = p->amb_off[k]+p->nx_amb[k]+p->nu_amb[k];
 
     for (i=start;i<stop;++i) {
       if (d_nlp->lbz[i]==d_nlp->ubz[i]) {
@@ -974,8 +1207,18 @@ void casadi_fatrop_solve(casadi_fatrop_data<T1>* d) {
     }
   }
   // Dynamics
-  for (k=0;k<str->K-1;++k) {
-    casadi_scaled_copy(-1.0, dual_data+str->dyn_eq_offs[k], p->nx[k+1], d_nlp->lam+p_nlp->nx+p->AB[k].offset_r);
+  if (p->manifold) {
+    // Multipliers of the original rows from those of the normalized rows at the solution
+    casadi_fatrop_update_M_at(d, d_nlp->z);
+    for (k=0;k<str->K-1;++k) {
+      casadi_fatrop_apply_M(d, k, dual_data+str->dyn_eq_offs[k],
+        d_nlp->lam+p_nlp->nx+p->AB[k].offset_r, 1);
+      casadi_scal(p->nx[k+1], -1.0, d_nlp->lam+p_nlp->nx+p->AB[k].offset_r);
+    }
+  } else {
+    for (k=0;k<str->K-1;++k) {
+      casadi_scaled_copy(-1.0, dual_data+str->dyn_eq_offs[k], p->nx[k+1], d_nlp->lam+p_nlp->nx+p->AB[k].offset_r);
+    }
   }
 
 

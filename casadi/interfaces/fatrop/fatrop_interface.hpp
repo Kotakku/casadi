@@ -145,6 +145,9 @@ namespace casadi {
     /// Exact Hessian?
     bool exact_hessian_;
 
+    /// Native support for option x_manifold (fatrop works in the tangent space)
+    bool supports_manifold() const override { return true;}
+
     /// All FATROP options
     Dict opts_;
 
@@ -217,6 +220,19 @@ namespace casadi {
 
     std::vector<casadi_int> AB_offsets_, CD_offsets_, RSQ_offsets_, I_offsets_;
     bool debug_;
+
+    /// \name Optimization on a manifold (option x_manifold)
+    /// nxs_, nus_ and the blocks are tangent dimensions; *_amb_ describe the primal vector
+    ///@{
+    bool manifold_;
+    std::vector<casadi_int> nxs_amb_, nus_amb_, amb_offs_, amb2tan_, M_offsets_;
+    /// Convert a manual structure (nx, nu of the primal vector) to tangent dimensions
+    void manifold_tangent_structure();
+    /// Sparsity used for automatic structure detection on a manifold
+    Sparsity manifold_detection_sparsity(const Sparsity& A) const;
+    /// Ambient stage structure and index maps (also for Euclidean problems)
+    void init_ambient_structure();
+    ///@}
   };
 
 } // namespace casadi

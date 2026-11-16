@@ -30,7 +30,6 @@
 #include "nlp_builder.hpp"
 #include "nlp_tools.hpp"
 #include <cctype>
-#include <functional>
 
 namespace casadi {
 
@@ -1623,20 +1622,23 @@ namespace casadi {
     set_nlpsol_prob();
   }
 
+  static void nlpsol_manifold_leaves(const Manifold& M, casadi_int offset,
+                                     casadi_int offset_tangent,
+                                     std::vector<Nlpsol::ManifoldLeaf>& leaves) {
+    if (M.n_components()==1 && M.component(0).get()==M.get()) {
+      leaves.push_back({M, offset, offset_tangent});
+      return;
+    }
+    std::vector<casadi_int> off = M.offsets(), off_tan = M.offsets_tangent();
+    for (casadi_int i=0; i<M.n_components(); ++i) {
+      nlpsol_manifold_leaves(M.component(i), offset + off[i], offset_tangent + off_tan[i],
+                             leaves);
+    }
+  }
+
   std::vector<Nlpsol::ManifoldLeaf> Nlpsol::manifold_leaves() const {
     std::vector<ManifoldLeaf> leaves;
-    std::function<void(const Manifold&, casadi_int, casadi_int)> visit =
-        [&](const Manifold& M, casadi_int offset, casadi_int offset_tangent) {
-      if (M.n_components()==1 && M.component(0).get()==M.get()) {
-        leaves.push_back({M, offset, offset_tangent});
-        return;
-      }
-      std::vector<casadi_int> off = M.offsets(), off_tan = M.offsets_tangent();
-      for (casadi_int i=0; i<M.n_components(); ++i) {
-        visit(M.component(i), offset + off[i], offset_tangent + off_tan[i]);
-      }
-    };
-    if (!x_manifold_.is_null()) visit(x_manifold_, 0, 0);
+    if (!x_manifold_.is_null()) nlpsol_manifold_leaves(x_manifold_, 0, 0, leaves);
     return leaves;
   }
 

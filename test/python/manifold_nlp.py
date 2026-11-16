@@ -438,5 +438,111 @@ class ManifoldOptiTests(casadiTestCase):
     self.checkarray(SO3.minus(ca.DM(sol.value(q)), q_target), ca.DM.zeros(3, 1), digits=8)
 
 
+def quadrotor_staged(opti, N=10, dt=0.1):
+  # type: (ca.Opti, int, float) -> tuple[list, list]
+  """Quadrotor with variables and constraints in stage order, as fatrop requires"""
+  R3 = ca.Manifold.Euclidean(3)
+  SO3 = ca.Manifold.SO3()
+  Mx = ca.Manifold.product([R3, R3, SO3, R3])
+
+  def F(x, u):
+    p, v, q, w = x[0:3], x[3:6], x[6:10], x[10:13]
+    acc = SO3.act(q, ca.vertcat(0, 0, u[0])) + ca.DM([0, 0, -9.81])
+    return ca.vertcat(p + v*dt, v + acc*dt, SO3.retract(q, w*dt), w + u[1:4]*dt)
+
+  x_init = ca.vertcat(ca.DM.zeros(6), SO3.exp(ca.DM([0.3, 0, 0])), ca.DM.zeros(3))
+  x_goal = ca.vertcat(ca.DM([1, 1, 1]), ca.DM.zeros(3), SO3.exp(ca.DM([0, 0, 1.0])),
+                      ca.DM.zeros(3))
+  X, U = [], []
+  for k in range(N+1):
+    X.append(opti.variable(Mx))
+    if k < N:
+      U.append(opti.variable(4))
+  J = 0
+  for k in range(N):
+    opti.subject_to(Mx.minus(X[k+1], F(X[k], U[k])) == 0)
+    if k == 0:
+      opti.subject_to(Mx.minus(X[0], x_init) == 0)
+    opti.subject_to(opti.bounded(0, U[k][0], 20))
+    opti.subject_to(opti.bounded(-2, U[k][1:], 2))
+    opti.set_initial(U[k][0], 9.81)
+    J += ca.sumsqr(U[k][1:])*dt + 0.01*ca.sumsqr(U[k][0] - 9.81)*dt
+  opti.minimize(J + 100*ca.sumsqr(Mx.minus(x_goal, X[N])))
+  return X, U
+
+
+FATROP_OPTS = {"expand": True, "print_time": False,
+               "fatrop": {"print_level": 0, "tol": 1e-12}}
+
+
+class ManifoldFatropTests(casadiTestCase):
+  """Native support for x_manifold in fatrop"""
+
+  def setUp(self):
+    if not ca.has_nlpsol("fatrop"):
+      self.skipTest("fatrop not available")
+
+  def test_quadrotor_opti(self):
+    N = 10
+    opti = ca.Opti()
+    X, U = quadrotor_staged(opti, N)
+    opti.solver("sqpmethod", dict(SQP_OPTS, tol_pr=1e-10, tol_du=1e-10))
+    sol = opti.solve()
+    Xs = ca.hcat([ca.DM(sol.value(x)) for x in X])
+    for structure in [{"structure_detection": "auto"},
+                      {"structure_detection": "manual", "N": N, "nx": [13]*(N+1),
+                       "nu": [4]*N + [0], "ng": [16] + [4]*(N-1) + [0]}]:
+      opti_f = ca.Opti()
+      Xf_sym, _ = quadrotor_staged(opti_f, N)
+      opti_f.solver("fatrop", dict(FATROP_OPTS, **structure))
+      sol_f = opti_f.solve()
+      stats = sol_f.stats()
+      self.assertTrue(stats["success"])
+      # fatrop works with tangent dimensions
+      self.assertEqual(list(stats["nx"]), [12]*(N+1))
+      Xf = ca.hcat([ca.DM(sol_f.value(x)) for x in Xf_sym])
+      self.checkarray(Xf, Xs, str(structure), digits=6)
+      for k in range(N+1):
+        self.checkarray(ca.norm_2(Xf[6:10, k]), ca.DM(1), digits=12)
+
+  def test_multipliers(self):
+    # bounds on Euclidean controls (lam_x) and normalized dynamics rows (lam_g)
+    nlp, M, args = attitude_ocp(N=10)
+    S = ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, x_manifold=M, tol_pr=1e-12,
+                                                tol_du=1e-12))
+    r = S(**args)
+    F = ca.nlpsol("F", "fatrop", nlp, dict(FATROP_OPTS, x_manifold=M, structure_detection="auto",
+                                           equality=[True]*nlp["g"].shape[0]))
+    rf = F(**args)
+    self.assertTrue(F.stats()["success"])
+    self.checkarray(rf["x"], r["x"], digits=6)
+    self.checkarray(rf["f"], r["f"], digits=4)
+    self.checkarray(rf["lam_g"]/400, r["lam_g"]/400, digits=6)
+    self.checkarray(rf["lam_x"], r["lam_x"], digits=6)
+    self.checkarray(rf["lam_x"][::10], ca.DM.zeros(11, 1))  # first entry of each quaternion
+
+  def test_structure_errors(self):
+    N = 4
+    opti = ca.Opti()
+    quadrotor_staged(opti, N)
+    # stage boundary inside a quaternion
+    opti.solver("fatrop", dict(FATROP_OPTS, structure_detection="manual", N=N,
+                               nx=[8] + [13]*N, nu=[9] + [4]*(N-1) + [0],
+                               ng=[16] + [4]*(N-1) + [0]))
+    with self.assertRaisesRegex(Exception, "splits an element"):
+      opti.solve()
+
+  def test_serialize_and_codegen(self):
+    nlp, M, args = attitude_ocp(N=6)
+    F = ca.nlpsol("F", "fatrop", nlp, dict(FATROP_OPTS, x_manifold=M, structure_detection="auto",
+                                           equality=[True]*nlp["g"].shape[0]))
+    F2 = ca.Function.deserialize(F.serialize())
+    r, r2 = F(**args), F2(**args)
+    self.assertTrue(F2.stats()["success"])
+    self.checkarray(r["x"], r2["x"], digits=10)
+    with self.assertRaisesRegex(Exception, "Code generation"):
+      F.generate("manifold_fatrop_codegen.c")
+
+
 if __name__ == '__main__':
     unittest.main()

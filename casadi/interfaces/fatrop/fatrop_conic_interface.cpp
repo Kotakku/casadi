@@ -1094,6 +1094,10 @@ casadi_int i, column;
     ocp_interface.full_eval_contr_viol = full_eval_contr_viol;
     ocp_interface.full_eval_obj_grad = full_eval_obj_grad;
     ocp_interface.full_eval_obj = full_eval_obj;
+    // Euclidean problem: no tangent dimensions or retraction
+    ocp_interface.get_nx_tangent = nullptr;
+    ocp_interface.get_nu_tangent = nullptr;
+    ocp_interface.apply_retraction = nullptr;
 
     FatropUserData user_data;
     user_data.solver = this;
