@@ -607,5 +607,121 @@ class ManifoldFatropTests(casadiTestCase):
       S.generate("manifold_sqp_codegen.c")
 
 
+def lagrangian_derivatives(nlp, lower=False, scale=1, grad=False):
+  # type: (dict, bool, float, bool) -> tuple[ca.Function, ca.Function]
+  """custom_hess_lag / custom_jac_g computed independently of the solver (SX)"""
+  x, f, g = nlp["x"], nlp["f"], nlp["g"]
+  p = ca.SX.sym("p", 0, 1)
+  lam_f, lam_g = ca.SX.sym("lam_f"), ca.SX.sym("lam_g", g.shape[0])
+  H = scale*ca.hessian(lam_f*f + ca.dot(lam_g, g), x)[0]
+  if lower:
+    H = ca.tril(H)
+  out = [H, scale*ca.gradient(lam_f*f + ca.dot(lam_g, g), x)] if grad else [H]
+  return (ca.Function("my_hess", [x, p, lam_f, lam_g], out),
+          ca.Function("my_jac", [x, p], [scale*ca.jacobian(g, x)]))
+
+
+class CustomDerivativeTests(casadiTestCase):
+  """Options custom_hess_lag and custom_jac_g (any solver, with and without x_manifold)"""
+
+  def check_used(self, nlp, solver, opts, hess_out, jac_name, x):
+    # type: (dict, str, dict, int, str, ca.DM) -> None
+    """With derivatives scaled by 2, the solver's derivative functions scale by 2"""
+    ref = ca.nlpsol("S", solver, nlp, opts)
+    H2, J2 = lagrangian_derivatives(nlp, scale=2)
+    S = ca.nlpsol("S", solver, nlp, dict(opts, custom_hess_lag=H2, custom_jac_g=J2))
+    lam_g = ca.DM(range(1, nlp["g"].shape[0] + 1))*0.1
+    h_ref = ref.get_function("nlp_hess_l")(x, [], 0.7, lam_g)
+    h = S.get_function("nlp_hess_l")(x, [], 0.7, lam_g)
+    if not isinstance(h, (list, tuple)):
+      h, h_ref = [h], [h_ref]
+    self.checkarray(h[hess_out], 2*h_ref[hess_out], solver + " hess")
+    j_ref = ref.get_function(jac_name)(x, [])
+    j = S.get_function(jac_name)(x, [])
+    self.checkarray(j[-1], 2*j_ref[-1], solver + " jac")
+
+  def test_euclidean(self):
+    x = ca.SX.sym("x", 3)
+    nlp = {"x": x, "f": (1 - x[0])**2 + 100*(x[1] - x[0]**2)**2 + ca.sin(x[2])*x[0],
+           "g": ca.vertcat(x[0]*x[1] - x[2], x[2]**2 + x[0])}
+    args = {"x0": [0.5, 0.5, 0.2], "lbg": [-1, 0.5], "ubg": [1, 2]}
+    solvers = [("sqpmethod", SQP_OPTS, 0, "nlp_jac_fg")]
+    if ca.has_nlpsol("ipopt"):
+      solvers.append(("ipopt", {"print_time": False, "ipopt": {"print_level": 0}}, 0,
+                      "nlp_jac_g"))
+    for solver, opts, hess_out, jac_name in solvers:
+      self.check_used(nlp, solver, opts, hess_out, jac_name, ca.DM([0.3, -0.2, 0.9]))
+      for lower in [False, True]:
+        H, J = lagrangian_derivatives(nlp, lower)
+        r = ca.nlpsol("S", solver, nlp, opts)(**args)
+        S = ca.nlpsol("S", solver, nlp, dict(opts, custom_hess_lag=H, custom_jac_g=J))
+        rc = S(**args)
+        self.checkarray(rc["x"], r["x"], solver, digits=8)
+
+  def test_manifold(self):
+    nlp, M, args = attitude_ocp(N=6)
+    solvers = [("sqpmethod", dict(SQP_OPTS, x_manifold=M), 0, "nlp_jac_fg")]
+    if ca.has_nlpsol("fatrop"):
+      solvers.append(("fatrop", dict(FATROP_OPTS, x_manifold=M, structure_detection="auto",
+                                     equality=[True]*nlp["g"].shape[0]), 1, "nlp_jac_g"))
+    x = M.retract(args["x0"], ca.DM.rand(M.ndx()))
+    for solver, opts, hess_out, jac_name in solvers:
+      # the tangent-space derivatives are linear in the ambient ones, up to the curvature
+      # term of the Hessian, which comes from the gradient: check the Jacobian only and
+      # the Hessian through the solution
+      ref = ca.nlpsol("S", solver, nlp, opts)
+      _, J2 = lagrangian_derivatives(nlp, scale=2)
+      S2 = ca.nlpsol("S", solver, nlp, dict(opts, custom_jac_g=J2))
+      self.checkarray(S2.get_function(jac_name)(x, [])[-1],
+                      2*ref.get_function(jac_name)(x, [])[-1], solver + " jac")
+      H, J = lagrangian_derivatives(nlp, grad=True)
+      r = ref(**args)
+      S = ca.nlpsol("S", solver, nlp, dict(opts, custom_hess_lag=H, custom_jac_g=J))
+      rc = S(**args)
+      self.assertTrue(S.stats()["success"], solver)
+      self.assertEqual(S.stats()["iter_count"], ref.stats()["iter_count"])
+      self.checkarray(rc["x"], r["x"], solver, digits=8)
+      # Hessian: identical to automatic differentiation
+      lam_g = ca.DM.rand(nlp["g"].shape[0])
+      self.checkarray(S.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[hess_out],
+                      ref.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[hess_out], solver)
+      if solver == "fatrop":
+        # the gradient (second output) is used as well
+        _, Jx = lagrangian_derivatives(nlp)
+        Hg2, _ = lagrangian_derivatives(nlp, scale=2, grad=True)
+        Sg = ca.nlpsol("S", solver, nlp, dict(opts, custom_hess_lag=Hg2))
+        self.checkarray(Sg.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[0],
+                        2*ref.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[0], "grad")
+      # ... and it is the custom one: a wrong custom Hessian changes the result
+      Hw, _ = lagrangian_derivatives(nlp, scale=2)
+      Sw = ca.nlpsol("S", solver, nlp, dict(opts, custom_hess_lag=Hw))
+      self.assertTrue(float(ca.norm_inf(Sw.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[hess_out]
+                                        - ref.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[hess_out]))
+                      > 1e-3, solver)
+
+  def test_errors(self):
+    x = ca.SX.sym("x", 2)
+    nlp = {"x": x, "f": ca.sumsqr(x), "g": x[0]*x[1]}
+    p = ca.SX.sym("p", 0, 1)
+    lf, lg = ca.SX.sym("lf"), ca.SX.sym("lg")
+    bad = ca.Function("h", [x, p, lf, lg], [ca.SX.zeros(3, 3)])
+    with self.assertRaisesRegex(Exception, "custom_hess_lag"):
+      ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, custom_hess_lag=bad))
+    upper = ca.Function("h", [x, p, lf, lg], [ca.triu(ca.mtimes(x, x.T))])
+    with self.assertRaisesRegex(Exception, "symmetric or lower triangular"):
+      ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, custom_hess_lag=upper))
+    badj = ca.Function("j", [x, p], [ca.SX.zeros(2, 2)])
+    with self.assertRaisesRegex(Exception, "custom_jac_g"):
+      ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, custom_jac_g=badj))
+    # not with options that modify the NLP (embed fallback: ipopt has no native support)
+    if ca.has_nlpsol("ipopt"):
+      q = ca.SX.sym("q", 4)
+      H = ca.Function("h", [q, p, lf, ca.SX.sym("lg", 0)], [ca.SX(4, 4)])
+      with self.assertRaisesRegex(Exception, "cannot be combined"):
+        ca.nlpsol("S", "ipopt", {"x": q, "f": q[1]},
+                  {"x_manifold": ca.Manifold.SO3(), "manifold_fallback": "embed",
+                   "custom_hess_lag": H})
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -87,6 +87,15 @@ namespace casadi {
     std::vector<casadi_int> detect_simple_bounds_target_x_;
     std::vector<casadi_int> detect_simple_bounds_target_g_;
 
+    /// User-provided derivatives of the NLP (options custom_hess_lag, custom_jac_g)
+    Function custom_hess_lag_, custom_jac_g_;
+
+    /// Use custom_hess_lag / custom_jac_g for the corresponding outputs
+    Function oracle_factory(const Function& oracle, const std::string& fname,
+      const std::vector<std::string>& s_in,
+      const std::vector<std::string>& s_out,
+      const Function::AuxOut& aux, const Dict& opts) const override;
+
     /// \name Optimization on manifolds
     ///@{
     /// Manifold of the decision variables (null if Euclidean)
@@ -141,6 +150,12 @@ namespace casadi {
 
     /// Derivatives of the retraction for the local coordinates (manifold_set_local_coordinates)
     Function manifold_T_, manifold_C_;
+    /// Split of the local coordinates: T is a unit selection from e_amb to e_tan and T_N
+    /// (manifold_TN_) on (n_amb, n_tan); tan_pos: position of each tangent index in
+    /// [e_tan; n_tan]
+    Function manifold_TN_;
+    std::vector<casadi_int> manifold_e_amb_, manifold_e_tan_, manifold_n_amb_, manifold_n_tan_,
+      manifold_tan_pos_;
     std::vector<casadi_int> manifold_pad_idx_;
     casadi_int manifold_nd_ = 0;
 

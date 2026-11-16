@@ -259,7 +259,7 @@ Function OracleFunction::create_function(const Function& oracle, const std::stri
     opt = combine(opts, opt);
 
     // Generate the function
-    ret = oracle.factory(fname, s_in, s_out, aux, opt);
+    ret = oracle_factory(oracle, fname, s_in, s_out, aux, opt);
 
     // Make sure that it's sound
     if (ret.has_free()) {
@@ -273,6 +273,13 @@ Function OracleFunction::create_function(const Function& oracle, const std::stri
   // Save and return
   set_function(ret, fname, true);
   return ret;
+}
+
+Function OracleFunction::oracle_factory(const Function& oracle, const std::string& fname,
+    const std::vector<std::string>& s_in,
+    const std::vector<std::string>& s_out,
+    const Function::AuxOut& aux, const Dict& opts) const {
+  return oracle.factory(fname, s_in, s_out, aux, opts);
 }
 
 Function OracleFunction::create_forward(const std::string& fname, casadi_int nfwd) {

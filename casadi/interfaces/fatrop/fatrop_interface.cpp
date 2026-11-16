@@ -685,7 +685,49 @@ namespace casadi {
     // Normalization matrices of the dynamics rows
     M_offsets_ = {0};
     for (casadi_int k=0; k<N_; ++k) M_offsets_.push_back(M_offsets_.back() + nxs_[k+1]*nxs_[k+1]);
+    init_M_blocks();
     (void)nt;
+  }
+
+  void FatropInterface::init_M_blocks() {
+    // Block-diagonal structure (up to a permutation) of the Jacobian blocks D_k of the
+    // dynamics rows w.r.t. x_{k+1}: connected components of its sparsity pattern
+    M_perm_.clear();
+    M_poff_ = {0};
+    M_bs_.clear();
+    M_boff_ = {0};
+    M_store_ = {0};
+    for (casadi_int k=0; k<N_; ++k) {
+      casadi_int n = nxs_[k+1];
+      std::vector<casadi_int> parent = range(n);
+      auto root = [&](casadi_int i) {
+        while (parent[i]!=i) i = parent[i] = parent[parent[i]];
+        return i;
+      };
+      if (manifold_ && !jacg_sp_.is_null() && k<I_blocks_.size()) {
+        const casadi_ocp_block& B = I_blocks_[k];
+        std::vector<casadi_int> mapping;
+        Sparsity D = jacg_sp_.sub(range(B.offset_r, B.offset_r+n),
+                                  range(B.offset_c, B.offset_c+n), mapping);
+        std::vector<casadi_int> r, c;
+        D.get_triplet(r, c);
+        for (casadi_int e=0; e<r.size(); ++e) parent[root(r[e])] = root(c[e]);
+      } else {
+        // unknown structure: one dense block
+        for (casadi_int i=1; i<n; ++i) parent[root(i)] = root(0);
+      }
+      std::map<casadi_int, std::vector<casadi_int>> comp;
+      for (casadi_int i=0; i<n; ++i) comp[root(i)].push_back(i);
+      casadi_int store = 0;
+      for (auto&& e : comp) {
+        M_perm_.insert(M_perm_.end(), e.second.begin(), e.second.end());
+        M_bs_.push_back(e.second.size());
+        store += e.second.size()*e.second.size();
+      }
+      M_poff_.push_back(M_perm_.size());
+      M_boff_.push_back(M_bs_.size());
+      M_store_.push_back(M_store_.back() + store);
+    }
   }
 
   int FatropInterface::init_mem(void* mem) const {
@@ -982,6 +1024,11 @@ void FatropInterface::set_fatrop_prob() {
   p_.amb_off = get_ptr(amb_offs_);
   p_.amb2tan = get_ptr(amb2tan_);
   p_.M_offsets = get_ptr(M_offsets_);
+  p_.M_perm = get_ptr(M_perm_);
+  p_.M_poff = get_ptr(M_poff_);
+  p_.M_bs = get_ptr(M_bs_);
+  p_.M_boff = get_ptr(M_boff_);
+  p_.M_store = get_ptr(M_store_);
   p_.nt = manifold_ ? x_manifold_.ndx() : nx_;
   if (manifold_) p_.nlp_step = OracleCallback("nlp_step", this);
   p_.write = &casadi_c_logger_write;
@@ -1043,6 +1090,11 @@ void FatropInterface::set_fatrop_prob(CodeGenerator& g) const {
   g << "p.amb_off = " << g.constant(amb_offs_) << ";\n";
   g << "p.amb2tan = " << g.constant(amb2tan_) << ";\n";
   g << "p.M_offsets = " << g.constant(M_offsets_) << ";\n";
+  g << "p.M_perm = " << g.constant(M_perm_) << ";\n";
+  g << "p.M_poff = " << g.constant(M_poff_) << ";\n";
+  g << "p.M_bs = " << g.constant(M_bs_) << ";\n";
+  g << "p.M_boff = " << g.constant(M_boff_) << ";\n";
+  g << "p.M_store = " << g.constant(M_store_) << ";\n";
   g << "p.nt = " << (manifold_ ? x_manifold_.ndx() : nx_) << ";\n";
   if (manifold_) g.setup_callback("p.nlp_step", get_function("nlp_step"));
 
@@ -1067,7 +1119,7 @@ void FatropInterface::set_fatrop_prob(CodeGenerator& g) const {
 }
 
 FatropInterface::FatropInterface(DeserializingStream& s) : Nlpsol(s) {
-  int version = s.version("FatropInterface", 1, 2);
+  int version = s.version("FatropInterface", 1, 3);
   s.unpack("FatropInterface::jacg_sp", jacg_sp_);
   s.unpack("FatropInterface::hesslag_sp", hesslag_sp_);
   s.unpack("FatropInterface::exact_hessian", exact_hessian_);
@@ -1115,6 +1167,15 @@ FatropInterface::FatropInterface(DeserializingStream& s) : Nlpsol(s) {
     s.unpack("FatropInterface::amb_offs", amb_offs_);
     s.unpack("FatropInterface::amb2tan", amb2tan_);
     s.unpack("FatropInterface::M_offsets", M_offsets_);
+    if (version>=3) {
+      s.unpack("FatropInterface::M_perm", M_perm_);
+      s.unpack("FatropInterface::M_poff", M_poff_);
+      s.unpack("FatropInterface::M_bs", M_bs_);
+      s.unpack("FatropInterface::M_boff", M_boff_);
+      s.unpack("FatropInterface::M_store", M_store_);
+    } else {
+      init_M_blocks();
+    }
   } else {
     manifold_ = false;
     init_ambient_structure();
@@ -1125,7 +1186,7 @@ FatropInterface::FatropInterface(DeserializingStream& s) : Nlpsol(s) {
 
 void FatropInterface::serialize_body(SerializingStream &s) const {
   Nlpsol::serialize_body(s);
-  s.version("FatropInterface", 2);
+  s.version("FatropInterface", 3);
 
   s.pack("FatropInterface::jacg_sp", jacg_sp_);
   s.pack("FatropInterface::hesslag_sp", hesslag_sp_);
@@ -1159,6 +1220,11 @@ void FatropInterface::serialize_body(SerializingStream &s) const {
   s.pack("FatropInterface::amb_offs", amb_offs_);
   s.pack("FatropInterface::amb2tan", amb2tan_);
   s.pack("FatropInterface::M_offsets", M_offsets_);
+  s.pack("FatropInterface::M_perm", M_perm_);
+  s.pack("FatropInterface::M_poff", M_poff_);
+  s.pack("FatropInterface::M_bs", M_bs_);
+  s.pack("FatropInterface::M_boff", M_boff_);
+  s.pack("FatropInterface::M_store", M_store_);
 }
 
 } // namespace casadi

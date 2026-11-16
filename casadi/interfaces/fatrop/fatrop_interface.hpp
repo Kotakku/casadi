@@ -227,6 +227,9 @@ namespace casadi {
     ///@{
     bool manifold_;
     std::vector<casadi_int> nxs_amb_, nus_amb_, amb_offs_, amb2tan_, M_offsets_;
+    /// Block structure of the normalization matrices (see casadi_fatrop_prob)
+    std::vector<casadi_int> M_perm_, M_poff_, M_bs_, M_boff_, M_store_;
+    void init_M_blocks();
     /// Convert a manual structure (nx, nu of the primal vector) to tangent dimensions
     void manifold_tangent_structure();
     /// Sparsity used for automatic structure detection on a manifold

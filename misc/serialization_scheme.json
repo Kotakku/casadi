@@ -62,7 +62,7 @@
       1
     ],
     "FatropInterface": [
-      2
+      3
     ],
     "Feasiblesqpmethod": [
       4
@@ -324,23 +324,44 @@
       ]
     },
     "FatropInterface": {
+      "FatropInterface::M_boff": [
+        3
+      ],
+      "FatropInterface::M_bs": [
+        3
+      ],
       "FatropInterface::M_offsets": [
-        2
+        2,
+        3
+      ],
+      "FatropInterface::M_perm": [
+        3
+      ],
+      "FatropInterface::M_poff": [
+        3
+      ],
+      "FatropInterface::M_store": [
+        3
       ],
       "FatropInterface::amb2tan": [
-        2
+        2,
+        3
       ],
       "FatropInterface::amb_offs": [
-        2
+        2,
+        3
       ],
       "FatropInterface::manifold": [
-        2
+        2,
+        3
       ],
       "FatropInterface::nus_amb": [
-        2
+        2,
+        3
       ],
       "FatropInterface::nxs_amb": [
-        2
+        2,
+        3
       ]
     },
     "Feasiblesqpmethod": {
@@ -995,7 +1016,8 @@
     ],
     "FatropInterface": [
       1,
-      2
+      2,
+      3
     ],
     "Feasiblesqpmethod": [
       1,
@@ -3625,7 +3647,7 @@
           "minimum": 1,
           "name": "FatropInterface",
           "op": "version",
-          "value": 2
+          "value": 3
         },
         {
           "name": "FatropInterface::jacg_sp",
@@ -3821,6 +3843,62 @@
                 "element": "casadi_int",
                 "name": "std::vector"
               }
+            },
+            {
+              "body": [
+                {
+                  "name": "FatropInterface::M_perm",
+                  "op": "field",
+                  "type": {
+                    "element": "casadi_int",
+                    "name": "std::vector"
+                  }
+                },
+                {
+                  "name": "FatropInterface::M_poff",
+                  "op": "field",
+                  "type": {
+                    "element": "casadi_int",
+                    "name": "std::vector"
+                  }
+                },
+                {
+                  "name": "FatropInterface::M_bs",
+                  "op": "field",
+                  "type": {
+                    "element": "casadi_int",
+                    "name": "std::vector"
+                  }
+                },
+                {
+                  "name": "FatropInterface::M_boff",
+                  "op": "field",
+                  "type": {
+                    "element": "casadi_int",
+                    "name": "std::vector"
+                  }
+                },
+                {
+                  "name": "FatropInterface::M_store",
+                  "op": "field",
+                  "type": {
+                    "element": "casadi_int",
+                    "name": "std::vector"
+                  }
+                }
+              ],
+              "condition": [
+                "greater_equal",
+                [
+                  "version",
+                  "FatropInterface"
+                ],
+                [
+                  "literal",
+                  3
+                ]
+              ],
+              "op": "if"
             }
           ],
           "condition": [
