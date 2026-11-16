@@ -145,6 +145,9 @@
     "MadnlpInterface": [
       2
     ],
+    "Manifold": [
+      1
+    ],
     "MosekInterface": [
       1
     ],
@@ -1059,6 +1062,9 @@
     "MadnlpInterface": [
       1,
       2
+    ],
+    "Manifold": [
+      1
     ],
     "MosekInterface": [
       1
@@ -2954,6 +2960,59 @@
           "op": "call"
         }
       ],
+      "CustomManifold::serialize_body": [
+        {
+          "name": "CustomManifold::name",
+          "op": "field",
+          "type": "std::string"
+        },
+        {
+          "name": "CustomManifold::retract",
+          "op": "field",
+          "type": "Function"
+        },
+        {
+          "name": "CustomManifold::minus",
+          "op": "field",
+          "type": "Function"
+        },
+        {
+          "name": "CustomManifold::project",
+          "op": "field",
+          "type": "Function"
+        },
+        {
+          "name": "CustomManifold::constraint",
+          "op": "field",
+          "type": "Function"
+        },
+        {
+          "name": "CustomManifold::identity",
+          "op": "field",
+          "type": "DM"
+        },
+        {
+          "name": "CustomManifold::has_identity",
+          "op": "field",
+          "type": "bool"
+        },
+        {
+          "name": "CustomManifold::euclidean_mask",
+          "op": "field",
+          "type": {
+            "element": "bool",
+            "name": "std::vector"
+          }
+        },
+        {
+          "name": "CustomManifold::euclidean_mask_tangent",
+          "op": "field",
+          "type": {
+            "element": "bool",
+            "name": "std::vector"
+          }
+        }
+      ],
       "CvodesInterface::serialize_body": [
         {
           "layout": "SundialsInterface::serialize_body",
@@ -3380,6 +3439,13 @@
           "name": "Erk::method",
           "op": "field",
           "type": "std::string"
+        }
+      ],
+      "EuclideanManifold::serialize_body": [
+        {
+          "name": "EuclideanManifold::n",
+          "op": "field",
+          "type": "casadi_int"
         }
       ],
       "External::serialize_body": [
@@ -7369,6 +7435,29 @@
           "op": "if"
         }
       ],
+      "Manifold::serialize": [
+        {
+          "op": "unsupported",
+          "reason": "Predicate has no serialized field"
+        }
+      ],
+      "ManifoldInternal::serialize": [
+        {
+          "name": "Manifold",
+          "op": "version",
+          "value": 1
+        },
+        {
+          "name": "Manifold::type",
+          "op": "field",
+          "type": "std::string"
+        },
+        {
+          "op": "unsupported",
+          "reason": "unlowered serialization call"
+        }
+      ],
+      "ManifoldInternal::serialize_body": [],
       "Map::serialize_body": [
         {
           "layout": "FunctionInternal::serialize_body",
@@ -8684,6 +8773,16 @@
           "name": "PluginInterface::plugin_name",
           "op": "field",
           "type": "std::string"
+        }
+      ],
+      "ProductManifold::serialize_body": [
+        {
+          "name": "ProductManifold::components",
+          "op": "field",
+          "type": {
+            "element": "Manifold",
+            "name": "std::vector"
+          }
         }
       ],
       "Project::serialize_body": [

@@ -116,8 +116,12 @@ namespace casadi {
   }
 
   void Manifold::serialize(SerializingStream& s) const {
-    s.pack("Manifold::null", is_null());
-    if (!is_null()) (*this)->serialize(s);
+    if (is_null()) {
+      s.pack("Manifold::null", true);
+    } else {
+      s.pack("Manifold::null", false);
+      (*this)->serialize(s);
+    }
   }
 
   Manifold Manifold::deserialize(DeserializingStream& s) {
