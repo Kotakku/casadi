@@ -294,7 +294,7 @@ namespace casadi {
     CustomManifold(const std::string& name, const Function& retract, const Function& minus,
                    const Dict& opts);
     std::string class_name() const override {return "CustomManifold";}
-    std::string repr() const override {return "Manifold(" + name_ + ")";}
+    std::string repr() const override {return name_;}
     std::vector<bool> euclidean_mask() const override {return mask_;}
     std::vector<bool> euclidean_mask_tangent() const override {return mask_tan_;}
     DM identity() const override {return identity_;}

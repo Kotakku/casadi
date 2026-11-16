@@ -41,32 +41,52 @@ namespace casadi {
       A Manifold describes a set whose elements are stored in an ambient
       representation of dimension nx (e.g. a unit quaternion, nx = 4), while
       local variations live in a tangent space of dimension ndx (e.g. so(3),
-      ndx = 3).
+      ndx = 3). It lets optimization variables such as orientations be
+      updated in the tangent space without leaving the manifold.
 
       The two primitive operations are
       - retract(x, dx): move from x along the tangent vector dx (x (+) dx)
       - minus(y, x):    tangent vector dx such that retract(x, dx) = y (y (-) x)
 
-      Conventions (shared by all built-in manifolds):
+      Built-in manifolds: Euclidean(n), SO2(), SO3(), SE2(), SE3(), Cartesian
+      products of manifolds (product) and user-defined manifolds (constructor
+      taking retract and minus Functions). All built-in manifolds are Lie
+      groups, as are products of Lie groups; for those, compose, inverse, exp,
+      log, act, hat, vee, as_matrix, Adj and the right/left Jacobians Jr, Jl
+      (and their inverses) are available.
+
+      Conventions shared by all built-in Lie groups:
       - right perturbation: retract(x, dx) = x * Exp(dx), minus(y, x) = Log(x^-1 * y)
+      - quaternions are Hamilton quaternions stored [w, x, y, z] (scalar first)
+      - the tangent vector of SE(2)/SE(3) is [translation; rotation]
 
-      All operations are available for DM (numeric), SX and MX arguments.
-      Arguments with K > 1 columns are processed column-wise; an argument with
-      a single column is broadcast.
+      All operations accept DM (numeric), SX and MX arguments. Arguments with
+      K > 1 columns are processed column-wise and an argument with a single
+      column is broadcast; matrix-valued results (e.g. Jr) are stacked
+      horizontally. Every operation is a casadi::Function (see get_function),
+      so it can be differentiated, code-generated and serialized. Near
+      singular points (e.g. zero rotation) Taylor series are used, so values
+      and derivatives up to second order stay finite.
 
-      Internally every operation is a casadi::Function (see get_function), so
-      it can be differentiated, code-generated and serialized like any other
-      Function.
-
-      Example (Python):
-
-      \\verbatim
-      >>> M = Manifold.product([Manifold.Euclidean(2), Manifold.Euclidean(1)])
-      >>> M.nx(), M.ndx()
-      (3, 3)
-      >>> M.retract(DM([1, 2, 3]), DM([0.5, 0, -1]))
-      DM([1.5, 2, 2])
-      \\endverbatim
+      \lang{python}
+      \doctest
+      >>> SO3 = Manifold.SO3()
+      >>> SO3.nx(), SO3.ndx(), SO3.is_lie_group()
+      (4, 3, True)
+      >>> q = SO3.exp(DM([0, 0, pi/2]))
+      >>> SO3.act(q, DM([1, 0, 0]))
+      DM([0, 1, 0])
+      >>> SO3.minus(SO3.retract(q, DM([0.1, 0, 0])), q)
+      DM([0.1, 0, 0])
+      >>> M = Manifold.product([Manifold.Euclidean(3), SO3])
+      >>> M, M.nx(), M.ndx(), M.euclidean_mask()
+      (Manifold(Product(Euclidean(3), SO3)), 7, 6, [True, True, True, False, False, False, False])
+      >>> x = MX.sym("x", 7); dx = MX.sym("dx", 6)
+      >>> f = Function("f", [x, dx], [M.retract(x, dx)])
+      >>> f(M.identity(), DM([1, 2, 3, 0, 0, 0]))
+      DM([1, 2, 3, 1, 0, 0, 0])
+      \enddoctest
+      \endlang
   */
   class CASADI_EXPORT Manifold
     : public SharedObject,
