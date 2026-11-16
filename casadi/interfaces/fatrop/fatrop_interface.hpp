@@ -147,6 +147,7 @@ namespace casadi {
 
     /// Native support for option x_manifold (fatrop works in the tangent space)
     bool supports_manifold() const override { return true;}
+    bool supports_manifold_codegen() const override { return true;}
 
     /// All FATROP options
     Dict opts_;

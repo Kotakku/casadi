@@ -22,6 +22,7 @@
 #
 import casadi as ca
 import numpy as np
+import os
 import unittest
 from helpers import casadiTestCase
 
@@ -138,8 +139,12 @@ class ManifoldNlpsolCommonTests(casadiTestCase):
     S = self.solver(nlp, M)
     with self.assertRaisesRegex(Exception, "sensitivities"):
       S.forward(1)
-    with self.assertRaisesRegex(Exception, "Code generation"):
-      S.generate("manifold_nlp_codegen.c")
+
+  def test_codegen(self):
+    M, nlp, _ = pose_problem()
+    S = self.solver(nlp, M)
+    args = dict(x0=[0, 0, 1, 0, 0, 0], ubx=[2.5, inf, inf, inf, inf, inf], lbg=-10, ubg=5)
+    self.check_codegen(S, args, std="c99", extralibs=["ipopt"], digits=8)
 
   def test_serialize(self):
     M, nlp, q_target = pose_problem()
@@ -532,6 +537,40 @@ class ManifoldFatropTests(casadiTestCase):
     with self.assertRaisesRegex(Exception, "splits an element"):
       opti.solve()
 
+  def test_euclidean_unchanged(self):
+    # Euclidean OCP (no x_manifold) through the same runtime, including code generation
+    N = 8
+    w, g, lbw, ubw = [], [], [], []
+    J = 0
+    x = ca.SX.sym("x0", 2)
+    w.append(x)
+    lbw += [1, 0]
+    ubw += [1, 0]
+    for k in range(N):
+      u = ca.SX.sym("u%d" % k)
+      w.append(u)
+      lbw += [-1]
+      ubw += [1]
+      x_next = ca.SX.sym("x%d" % (k+1), 2)
+      w.append(x_next)
+      lbw += [-inf, -inf]
+      ubw += [inf, inf]
+      g.append(x_next - ca.vertcat(x[0] + 0.1*x[1], x[1] + 0.1*u))
+      J += ca.sumsqr(x) + u**2
+      x = x_next
+    nlp = {"x": ca.vertcat(*w), "f": J + 10*ca.sumsqr(x), "g": ca.vertcat(*g)}
+    args = {"lbx": lbw, "ubx": ubw, "lbg": 0, "ubg": 0}
+    F = ca.nlpsol("F", "fatrop", nlp, dict(FATROP_OPTS, structure_detection="auto",
+                                           equality=[True]*2*N))
+    S = ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, tol_pr=1e-12, tol_du=1e-12))
+    rf, rs = F(**args), S(**args)
+    self.assertTrue(F.stats()["success"])
+    for k in ["x", "lam_g", "lam_x"]:
+      self.checkarray(rf[k], rs[k], k, digits=6)
+    flags = [] if os.name == "nt" else ["-Wno-strict-prototypes"]
+    self.check_codegen(F, args, std="c99", extralibs=["fatrop", "blasfeo"], extra_options=flags,
+                       digits=8)
+
   def test_serialize_and_codegen(self):
     nlp, M, args = attitude_ocp(N=6)
     F = ca.nlpsol("F", "fatrop", nlp, dict(FATROP_OPTS, x_manifold=M, structure_detection="auto",
@@ -540,8 +579,14 @@ class ManifoldFatropTests(casadiTestCase):
     r, r2 = F(**args), F2(**args)
     self.assertTrue(F2.stats()["success"])
     self.checkarray(r["x"], r2["x"], digits=10)
+    # Code generation (compiled and compared with --run_slow)
+    flags = [] if os.name == "nt" else ["-Wno-strict-prototypes"]
+    self.check_codegen(F, args, std="c99", extralibs=["fatrop", "blasfeo"], extra_options=flags,
+                       digits=8)
+    # sqpmethod has no code generation support with x_manifold
+    S = ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, x_manifold=M))
     with self.assertRaisesRegex(Exception, "Code generation"):
-      F.generate("manifold_fatrop_codegen.c")
+      S.generate("manifold_sqp_codegen.c")
 
 
 if __name__ == '__main__':

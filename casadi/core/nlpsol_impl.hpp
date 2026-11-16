@@ -266,6 +266,9 @@ namespace casadi {
     */
     virtual bool supports_manifold() const { return false;}
 
+    /// Can the plugin generate code with option x_manifold?
+    virtual bool supports_manifold_codegen() const { return false;}
+
     /** \brief Set the (persistent) work vectors
 
         \identifier{1nz} */

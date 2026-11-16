@@ -831,6 +831,7 @@ void FatropInterface::codegen_declarations(CodeGenerator& g) const {
   if (exact_hessian_) {
     g.add_dependency(get_function("nlp_hess_l"));
   }
+  if (manifold_) g.add_dependency(get_function("nlp_step"));
   g.add_include("fatrop/ocp/OCPCInterface.h");
 
   std::string name = "fatrop_cb_write";
@@ -1032,14 +1033,14 @@ void FatropInterface::set_fatrop_prob(CodeGenerator& g) const {
   codegen_unpack_block(g, "RSQ", RSQ_blocks_);
   codegen_unpack_block(g, "I", I_blocks_);
   g << "p.N = " << N_ << ";\n";
-  casadi_assert(!manifold_, "Code generation with option 'x_manifold' is not supported.");
-  g << "p.manifold = 0;\n";
+  g << "p.manifold = " << static_cast<casadi_int>(manifold_) << ";\n";
   g << "p.nx_amb = " << g.constant(nxs_amb_) << ";\n";
   g << "p.nu_amb = " << g.constant(nus_amb_) << ";\n";
   g << "p.amb_off = " << g.constant(amb_offs_) << ";\n";
   g << "p.amb2tan = " << g.constant(amb2tan_) << ";\n";
   g << "p.M_offsets = " << g.constant(M_offsets_) << ";\n";
-  g << "p.nt = " << nx_ << ";\n";
+  g << "p.nt = " << (manifold_ ? x_manifold_.ndx() : nx_) << ";\n";
+  if (manifold_) g.setup_callback("p.nlp_step", get_function("nlp_step"));
 
   g.setup_callback("p.nlp_jac_g", get_function("nlp_jac_g"));
   g.setup_callback("p.nlp_grad_f", get_function("nlp_grad_f"));
