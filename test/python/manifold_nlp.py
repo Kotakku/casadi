@@ -306,5 +306,137 @@ class ManifoldSqpmethodTests(casadiTestCase):
       self.solver({"x": x, "f": ca.sumsqr(x)}, M)
 
 
+def quadrotor(opti, N=10, dt=0.1):
+  # type: (ca.Opti, int, float) -> tuple[ca.MX, ca.MX, ca.Manifold]
+  """Quadrotor with state (p, v, q, omega) in R3 x R3 x SO3 x R3 and input (thrust, torque)"""
+  R3 = ca.Manifold.Euclidean(3)
+  SO3 = ca.Manifold.SO3()
+  Mx = ca.Manifold.product([R3, R3, SO3, R3])
+  X = opti.variable(Mx, N+1)
+  U = opti.variable(4, N)
+
+  def F(x, u):
+    p, v, q, w = x[0:3], x[3:6], x[6:10], x[10:13]
+    acc = SO3.act(q, ca.vertcat(0, 0, u[0])) + ca.DM([0, 0, -9.81])
+    return ca.vertcat(p + v*dt, v + acc*dt, SO3.retract(q, w*dt), w + u[1:4]*dt)
+
+  x_init = ca.vertcat(ca.DM.zeros(6), SO3.exp(ca.DM([0.3, 0, 0])), ca.DM.zeros(3))
+  x_goal = ca.vertcat(ca.DM([1, 1, 1]), ca.DM.zeros(3), SO3.exp(ca.DM([0, 0, 1.0])),
+                      ca.DM.zeros(3))
+  opti.subject_to(Mx.minus(X[:, 0], x_init) == 0)
+  for k in range(N):
+    opti.subject_to(Mx.minus(X[:, k+1], F(X[:, k], U[:, k])) == 0)
+  opti.subject_to(opti.bounded(0, U[0, :], 20))
+  opti.subject_to(opti.bounded(-2, U[1:, :], 2))
+  opti.minimize(ca.sumsqr(U[1:, :])*dt + 0.01*ca.sumsqr(U[0, :] - 9.81)*dt
+                + 100*ca.sumsqr(Mx.minus(x_goal, X[:, N])))
+  opti.set_initial(U[0, :], 9.81)
+  return X, U, Mx
+
+
+class ManifoldOptiTests(casadiTestCase):
+  """Decision variables on manifolds in Opti"""
+
+  def test_variable(self):
+    opti = ca.Opti()
+    SO3 = ca.Manifold.SO3()
+    q = opti.variable(SO3)
+    Q = opti.variable(SO3, 3)
+    self.assertEqual(q.shape, (4, 1))
+    self.assertEqual(Q.shape, (4, 3))
+    # default initial guess is the identity element
+    self.checkarray(opti.debug.value(Q, opti.initial()), ca.repmat(SO3.identity(), 1, 3))
+
+  def test_quadrotor(self):
+    opti = ca.Opti()
+    X, U, Mx = quadrotor(opti)
+    opti.solver("sqpmethod", dict(SQP_OPTS, tol_pr=1e-10, tol_du=1e-10))
+    sol = opti.solve()
+    self.assertTrue(sol.stats()["success"])
+    Xv = ca.DM(sol.value(X))
+    for k in range(Xv.shape[1]):
+      self.checkarray(ca.norm_2(Xv[6:10, k]), ca.DM(1), digits=10)
+    if ca.has_nlpsol("ipopt"):
+      opti_i = ca.Opti()
+      Xi, _, _ = quadrotor(opti_i)
+      opti_i.solver("ipopt", {"manifold_fallback": "embed", "print_time": False,
+                              "ipopt.print_level": 0, "ipopt.sb": "yes", "ipopt.tol": 1e-10})
+      sol_i = opti_i.solve()
+      self.checkarray(Xv, ca.DM(sol_i.value(Xi)), digits=5)
+
+  def test_to_function(self):
+    opti = ca.Opti()
+    SO3 = ca.Manifold.SO3()
+    q = opti.variable(SO3)
+    target = opti.parameter(3)
+    opti.minimize(ca.sumsqr(SO3.minus(SO3.exp(target), q)))
+    opti.solver("sqpmethod", SQP_OPTS)
+    F = opti.to_function("F", [target], [q])
+    v = ca.DM([0.4, -0.1, 0.7])
+    self.checkarray(F(v), SO3.exp(v), digits=8)
+
+  def test_ambient_equality(self):
+    R3 = ca.Manifold.Euclidean(3)
+    SO3 = ca.Manifold.SO3()
+    Mx = ca.Manifold.product([R3, SO3])
+    for lhs in [lambda X: X[:, 0], lambda X: X[3:7, 0], lambda X: 2*X[3:7, 1]]:
+      opti = ca.Opti()
+      X = opti.variable(Mx, 2)
+      opti.subject_to(lhs(X) == ca.DM.ones(lhs(X).shape))
+      opti.minimize(ca.sumsqr(X))
+      opti.solver("sqpmethod", SQP_OPTS)
+      with self.assertRaisesRegex(Exception, "M.minus"):
+        opti.solve()
+    # Euclidean parts and partial quaternion constraints are fine
+    opti = ca.Opti()
+    X = opti.variable(Mx, 1)
+    opti.subject_to(X[0:3] == ca.DM([1, 2, 3]))
+    opti.subject_to(X[6] == 0)
+    q_target = SO3.exp(ca.DM([0.3, 0.2, 0.1]))
+    opti.minimize(ca.sumsqr(SO3.minus(q_target, X[3:7])))
+    opti.solver("sqpmethod", SQP_OPTS)
+    sol = opti.solve()
+    self.checkarray(sol.value(X[0:3]), ca.DM([1, 2, 3]), digits=8)
+    self.checkarray(ca.DM(sol.value(X[6])), ca.DM(0), digits=8)
+
+  def test_errors(self):
+    SO3 = ca.Manifold.SO3()
+    # explicit x_manifold
+    opti = ca.Opti()
+    q = opti.variable(SO3)
+    opti.minimize(ca.sumsqr(SO3.minus(SO3.exp(ca.DM([1, 0, 0])), q)))
+    opti.solver("sqpmethod", dict(SQP_OPTS, x_manifold=SO3))
+    with self.assertRaisesRegex(Exception, "set by Opti"):
+      opti.solve()
+    # linear scaling
+    opti = ca.Opti()
+    q = opti.variable(SO3)
+    opti.minimize(ca.sumsqr(SO3.minus(SO3.exp(ca.DM([1, 0, 0])), q)))
+    opti.set_linear_scale(q, 2)
+    opti.solver("sqpmethod", SQP_OPTS)
+    with self.assertRaisesRegex(Exception, "Linear scaling"):
+      opti.solve()
+    # solver without native support
+    if ca.has_nlpsol("ipopt"):
+      opti = ca.Opti()
+      q = opti.variable(SO3)
+      opti.minimize(ca.sumsqr(SO3.minus(SO3.exp(ca.DM([1, 0, 0])), q)))
+      opti.solver("ipopt")
+      with self.assertRaisesRegex(Exception, "no native support"):
+        opti.solve()
+
+  def test_initial_guess(self):
+    SO3 = ca.Manifold.SO3()
+    opti = ca.Opti()
+    q = opti.variable(SO3)
+    q_target = SO3.exp(ca.DM([1, 0.5, 0]))
+    opti.minimize(ca.sumsqr(SO3.minus(q_target, q)))
+    # an initial guess off the manifold is projected by nlpsol
+    opti.set_initial(q, [2, 0, 0.2, 0])
+    opti.solver("sqpmethod", SQP_OPTS)
+    sol = opti.solve()
+    self.checkarray(SO3.minus(ca.DM(sol.value(q)), q_target), ca.DM.zeros(3, 1), digits=8)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -67,6 +67,13 @@ public:
   MX variable(casadi_int n=1, casadi_int m=1, const std::string& attribute="full");
   MX variable(const Sparsity& sp, const std::string& attribute="full");
   MX variable(const MX& symbol, const std::string& attribute="full");
+  MX variable(const Manifold& M, casadi_int m=1);
+
+  /// Manifold of a decision variable (null if Euclidean)
+  Manifold variable_manifold(const MX& symbol) const;
+
+  /// Assemble x_manifold_ and check the use of manifold variables (part of bake)
+  void bake_manifold(const std::vector<MX>& x);
 
   /// Create a parameter (symbol); fixed during optimization
   MX parameter(casadi_int n=1, casadi_int m=1, const std::string& attribute="full");
@@ -430,6 +437,9 @@ private:
   MXDict nlp_unscaled_;
   MX lam_;
   std::vector<double> linear_scale_;
+
+  /// Manifold of the decision variables (null if all are Euclidean)
+  Manifold x_manifold_;
   std::vector<double> linear_scale_offset_;
   std::vector<double> g_linear_scale_;
   std::vector<double> h_linear_scale_;

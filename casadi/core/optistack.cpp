@@ -72,6 +72,14 @@ MX Opti::variable(const MX& symbol, const std::string& attribute) {
   }
 }
 
+MX Opti::variable(const Manifold& M, casadi_int m) {
+  try {
+    return (*this)->variable(M, m);
+  } catch(std::exception& e) {
+    THROW_ERROR("variable", e.what());
+  }
+}
+
 Opti::Opti(OptiNode* node) {
   own(node);
 }

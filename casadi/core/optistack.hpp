@@ -27,6 +27,7 @@
 
 #include "function.hpp"
 #include "callback.hpp"
+#include "manifold.hpp"
 
 namespace casadi {
 
@@ -391,6 +392,22 @@ public:
   MX variable(const Sparsity& sp, const std::string& attribute="full");
   /// Register an existing MX symbol as a decision variable of this instance
   MX variable(const MX& symbol, const std::string& attribute="full");
+
+  /** \brief Create a decision variable on a manifold
+
+      Returns an M.nx()-by-m symbol; every column is an element of M in its
+      ambient representation (e.g. a unit quaternion for Manifold::SO3()).
+      The solver receives the product of all manifolds as option 'x_manifold'
+      (see nlpsol), so it must support manifolds natively (e.g. 'sqpmethod')
+      or be given the option manifold_fallback='embed'. The default initial
+      guess is the identity element.
+
+      Write equalities between manifold elements in the tangent space,
+      M.minus(a, b) == 0; an equality between all ambient coordinates of an
+      element (a == b) imposes nx equations on ndx degrees of freedom and is
+      rejected.
+  */
+  MX variable(const Manifold& M, casadi_int m=1);
 
   /** \brief Create a parameter (symbol); fixed during optimization
 
