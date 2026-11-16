@@ -30,6 +30,7 @@
 #include "nlp_builder.hpp"
 #include "nlp_tools.hpp"
 #include <cctype>
+#include <functional>
 
 namespace casadi {
 
@@ -1620,6 +1621,69 @@ namespace casadi {
     }
     if (!x_manifold_.is_null()) init_manifold();
     set_nlpsol_prob();
+  }
+
+  std::vector<Nlpsol::ManifoldLeaf> Nlpsol::manifold_leaves() const {
+    std::vector<ManifoldLeaf> leaves;
+    std::function<void(const Manifold&, casadi_int, casadi_int)> visit =
+        [&](const Manifold& M, casadi_int offset, casadi_int offset_tangent) {
+      if (M.n_components()==1 && M.component(0).get()==M.get()) {
+        leaves.push_back({M, offset, offset_tangent});
+        return;
+      }
+      std::vector<casadi_int> off = M.offsets(), off_tan = M.offsets_tangent();
+      for (casadi_int i=0; i<M.n_components(); ++i) {
+        visit(M.component(i), offset + off[i], offset_tangent + off_tan[i]);
+      }
+    };
+    if (!x_manifold_.is_null()) visit(x_manifold_, 0, 0);
+    return leaves;
+  }
+
+  template<typename X>
+  static Function nlpsol_manifold_local_oracle(const Function& oracle, const Manifold& M,
+      casadi_int nd, const std::vector<casadi_int>& tan_idx,
+      const std::vector<casadi_int>& pad_idx) {
+    X x = X::sym("x", oracle.sparsity_in(NL_X));
+    X p = X::sym("p", oracle.sparsity_in(NL_P));
+    X d = X::sym("d", nd);
+    X dt = tan_idx.empty() ? X(0, 1) : X(d(tan_idx));
+    std::vector<X> fg = oracle(std::vector<X>{reshape(M.retract(vec(x), dt), x.size()), p});
+    X f = fg.at(NL_F);
+    if (!pad_idx.empty()) f += 0.5*sumsqr(d(pad_idx));
+    return Function("nlp_local", {x, p, d}, {f, fg.at(NL_G)},
+                    {"x", "p", "d"}, {"f", "g"});
+  }
+
+  Function Nlpsol::manifold_local_oracle(casadi_int nd, const std::vector<casadi_int>& tan_idx,
+                                         const std::vector<casadi_int>& pad_idx) const {
+    return oracle_.is_a("SXFunction")
+      ? nlpsol_manifold_local_oracle<SX>(oracle_, x_manifold_, nd, tan_idx, pad_idx)
+      : nlpsol_manifold_local_oracle<MX>(oracle_, x_manifold_, nd, tan_idx, pad_idx);
+  }
+
+  void Nlpsol::manifold_create_function(const Function& local, const std::string& fname,
+                                        const std::vector<std::string>& s_in,
+                                        const std::vector<std::string>& s_out,
+                                        const Function::AuxOut& aux) {
+    std::vector<std::string> s_in_d = s_in;
+    s_in_d.push_back("d");
+    Function f = local.factory(fname + "_local", s_in_d, s_out, aux);
+    // Fix d = 0
+    std::vector<MX> arg = f.mx_in();
+    std::vector<MX> call_arg = arg;
+    call_arg.back() = MX::zeros(f.sparsity_in(f.n_in()-1));
+    arg.pop_back();
+    Function ret(fname, arg, f(call_arg), s_in, f.name_out());
+    if (local.is_a("SXFunction")) ret = ret.expand();
+    set_function(ret, fname);
+  }
+
+  void Nlpsol::manifold_create_step(casadi_int nd, const std::vector<casadi_int>& tan_idx) {
+    SX x = SX::sym("x", nx_), dx = SX::sym("dx", nd), t = SX::sym("t");
+    SX dt = tan_idx.empty() ? SX(0, 1) : SX(dx(tan_idx));
+    set_function(Function("nlp_step", {x, dx, t}, {x_manifold_.retract(x, t*dt)},
+                          {"x", "dx", "t"}, {"x_next"}), "nlp_step");
   }
 
   void Nlpsol::init_manifold() {

@@ -825,55 +825,11 @@ int Sqpmethod::solve(void* mem) const {
   return 0;
 }
 
-namespace {
-  // Leaves of a (possibly nested) product manifold, with their ambient offsets
-  void manifold_leaves(const Manifold& M, casadi_int offset,
-                       std::vector<std::pair<Manifold, casadi_int> >& leaves) {
-    if (M.n_components()==1 && M.component(0).get()==M.get()) {
-      leaves.push_back({M, offset});
-      return;
-    }
-    std::vector<casadi_int> off = M.offsets();
-    for (casadi_int i=0; i<M.n_components(); ++i) {
-      manifold_leaves(M.component(i), offset + off[i], leaves);
-    }
-  }
-
-  // Local parametrization of the NLP: (x, p, d) -> (f, g) at retract(x, P d)
-  template<typename X>
-  Function manifold_local_oracle(const Function& oracle, const Manifold& M,
-                                 const std::vector<casadi_int>& tan_idx,
-                                 const std::vector<casadi_int>& pad_idx) {
-    X x = X::sym("x", oracle.sparsity_in(NL_X));
-    X p = X::sym("p", oracle.sparsity_in(NL_P));
-    X d = X::sym("d", x.numel());
-    X dt = tan_idx.empty() ? X(0, 1) : X(d(tan_idx));
-    std::vector<X> fg = oracle(std::vector<X>{reshape(M.retract(vec(x), dt), x.size()), p});
-    X f = fg.at(NL_F);
-    if (!pad_idx.empty()) f += 0.5*sumsqr(d(pad_idx));
-    return Function("nlp_local", {x, p, d}, {f, fg.at(NL_G)},
-                    {"x", "p", "d"}, {"f", "g"});
-  }
-
-  // Fix the input d = 0 of a function with inputs (x, p, ..., d)
-  Function manifold_at_zero(const Function& f, const std::string& name) {
-    std::vector<MX> arg = f.mx_in();
-    std::vector<MX> call_arg = arg;
-    call_arg.back() = MX::zeros(f.sparsity_in(f.n_in()-1));
-    arg.pop_back();
-    std::vector<std::string> name_in = f.name_in();
-    name_in.pop_back();
-    return Function(name, arg, f(call_arg), name_in, f.name_out());
-  }
-} // namespace
-
 void Sqpmethod::init_manifold_functions() {
   // Padded tangent coordinates
-  std::vector<std::pair<Manifold, casadi_int> > leaves;
-  manifold_leaves(x_manifold_, 0, leaves);
   std::vector<casadi_int> tan_idx, pad_idx;
-  for (auto&& e : leaves) {
-    const Manifold& L = e.first;
+  for (auto&& e : manifold_leaves()) {
+    const Manifold& L = e.m;
     std::vector<bool> mask = L.euclidean_mask();
     bool partially_euclidean = !L.is_euclidean()
       && std::find(mask.begin(), mask.end(), true) != mask.end();
@@ -881,33 +837,20 @@ void Sqpmethod::init_manifold_functions() {
       "sqpmethod: option 'x_manifold' does not support the manifold " + str(L)
       + ", which is neither Euclidean nor free of Euclidean entries.");
     for (casadi_int k=0; k<L.nx(); ++k) {
-      (k<L.ndx() ? tan_idx : pad_idx).push_back(e.second + k);
+      (k<L.ndx() ? tan_idx : pad_idx).push_back(e.offset + k);
     }
   }
 
-  // Local parametrization of the NLP
-  Function local = oracle_.is_a("SXFunction")
-    ? manifold_local_oracle<SX>(oracle_, x_manifold_, tan_idx, pad_idx)
-    : manifold_local_oracle<MX>(oracle_, x_manifold_, tan_idx, pad_idx);
-
-  // First and second order derivatives with respect to d at d = 0
-  Function jac = local.factory("nlp_jac_fg_local", {"x", "p", "d"},
-                               {"f", "grad:f:d", "g", "jac:g:d"});
-  bool sx = local.is_a("SXFunction");
-  Function jac_fg = manifold_at_zero(jac, "nlp_jac_fg");
-  set_function(sx ? jac_fg.expand() : jac_fg, "nlp_jac_fg");
+  // Local parametrization of the NLP and its derivatives with respect to d at d = 0
+  Function local = manifold_local_oracle(nx_, tan_idx, pad_idx);
+  manifold_create_function(local, "nlp_jac_fg", {"x", "p"}, {"f", "grad:f:d", "g", "jac:g:d"});
   if (exact_hessian_) {
-    Function hess = local.factory("nlp_hess_l_local", {"x", "p", "lam:f", "lam:g", "d"},
-                                  {"hess:gamma:d:d"}, {{"gamma", {"f", "g"}}});
-    Function hess_l = manifold_at_zero(hess, "nlp_hess_l");
-    set_function(sx ? hess_l.expand() : hess_l, "nlp_hess_l");
+    manifold_create_function(local, "nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
+                             {"hess:gamma:d:d"}, {{"gamma", {"f", "g"}}});
   }
 
   // Step along the manifold: (x, dx, t) -> retract(x, t*P dx)
-  SX x = SX::sym("x", nx_), dx = SX::sym("dx", nx_), t = SX::sym("t");
-  SX dt = tan_idx.empty() ? SX(0, 1) : SX(dx(tan_idx));
-  set_function(Function("nlp_step", {x, dx, t}, {x_manifold_.retract(x, t*dt)},
-                        {"x", "dx", "t"}, {"x_next"}), "nlp_step");
+  manifold_create_step(nx_, tan_idx);
 }
 
 int Sqpmethod::take_step(SqpmethodMemory* m, const double* x, double t, const double* dx,
