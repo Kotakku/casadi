@@ -406,6 +406,24 @@ public:
       M.minus(a, b) == 0; an equality between all ambient coordinates of an
       element (a == b) imposes nx equations on ndx degrees of freedom and is
       rejected.
+
+      \lang{python}
+      \doctest
+      >>> SO3 = Manifold.SO3()
+      >>> opti = Opti()
+      >>> q = opti.variable(SO3)
+      >>> q.shape
+      (4, 1)
+      >>> q_target = SO3.exp(DM([0.3, -0.2, 0.8]))
+      >>> opti.minimize(sumsqr(SO3.minus(q_target, q)))
+      >>> opti.solver("sqpmethod", {"qpsol": "qrqp", "print_time": False, "print_header": False,
+      ...   "print_iteration": False, "print_status": False,
+      ...   "qpsol_options": {"print_iter": False, "print_header": False}})
+      >>> sol = opti.solve()
+      >>> float(norm_2(SO3.minus(DM(sol.value(q)), q_target))) < 1e-10
+      True
+      \enddoctest
+      \endlang
   */
   MX variable(const Manifold& M, casadi_int m=1);
 
