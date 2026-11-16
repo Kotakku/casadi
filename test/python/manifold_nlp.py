@@ -1,0 +1,158 @@
+#
+#     This file is part of CasADi.
+#
+#     CasADi -- A symbolic framework for dynamic optimization.
+#     Copyright (C) 2010-2023 Joel Andersson, Joris Gillis, Moritz Diehl,
+#                             KU Leuven. All rights reserved.
+#     Copyright (C) 2011-2014 Greg Horn
+#
+#     CasADi is free software; you can redistribute it and/or
+#     modify it under the terms of the GNU Lesser General Public
+#     License as published by the Free Software Foundation; either
+#     version 3 of the License, or (at your option) any later version.
+#
+#     CasADi is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#     Lesser General Public License for more details.
+#
+#     You should have received a copy of the GNU Lesser General Public
+#     License along with CasADi; if not, write to the Free Software
+#     Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+#
+import casadi as ca
+import numpy as np
+import unittest
+from helpers import casadiTestCase
+
+inf = float("inf")
+
+
+def attitude_problem():
+  # type: () -> tuple[ca.Manifold, dict, ca.DM]
+  """min |minus(q_target, q)|^2 over unit quaternions q"""
+  SO3 = ca.Manifold.SO3()
+  q = ca.MX.sym("q", 4)
+  q_target = SO3.exp(ca.DM([0.3, -0.2, 0.8]))
+  return SO3, {"x": q, "f": ca.sumsqr(SO3.minus(q_target, q))}, q_target
+
+
+def pose_problem():
+  # type: () -> tuple[ca.Manifold, dict, ca.DM]
+  """Euclidean position with a bound and a constraint, plus an orientation"""
+  SO3 = ca.Manifold.SO3()
+  M = ca.Manifold.product([ca.Manifold.Euclidean(2), SO3])
+  x = ca.MX.sym("x", 6)
+  q_target = SO3.exp(ca.DM([0.1, 0.5, -0.4]))
+  f = ca.sumsqr(x[:2] - 3) + ca.sumsqr(SO3.minus(q_target, x[2:]))
+  return M, {"x": x, "f": f, "g": x[0] + x[1]}, q_target
+
+
+class ManifoldNlpsolCommonTests(casadiTestCase):
+  """Option x_manifold in the Nlpsol base class"""
+
+  def setUp(self):
+    if not ca.has_nlpsol("ipopt"):
+      self.skipTest("ipopt not available")
+    self.opts = {"ipopt.print_level": 0, "print_time": False, "ipopt.sb": "yes"}
+
+  def solver(self, nlp, M, **opts):
+    # type: (dict, ca.Manifold, ...) -> ca.Function
+    o = dict(self.opts)
+    o.update({"x_manifold": M, "manifold_fallback": "embed"})
+    o.update(opts)
+    return ca.nlpsol("S", "ipopt", nlp, o)
+
+  def test_option_type(self):
+    self.assertEqual(ca.nlpsol_option_type("ipopt", "x_manifold"), "OT_MANIFOLD")
+    self.assertEqual(ca.nlpsol_option_type("ipopt", "manifold_fallback"), "OT_STRING")
+
+  def test_no_native_support(self):
+    M, nlp, _ = attitude_problem()
+    with self.assertRaisesRegex(Exception, "no native support"):
+      ca.nlpsol("S", "ipopt", nlp, {"x_manifold": M})
+    with self.assertRaisesRegex(Exception, "no native support"):
+      ca.nlpsol("S", "ipopt", nlp, {"x_manifold": M, "manifold_fallback": "error"})
+    with self.assertRaisesRegex(Exception, "manifold_fallback"):
+      ca.nlpsol("S", "ipopt", nlp, {"x_manifold": M, "manifold_fallback": "foo"})
+
+  def test_dimension_mismatch(self):
+    _, nlp, _ = attitude_problem()
+    for fb in ["error", "embed"]:
+      with self.assertRaisesRegex(Exception, "nx = 7"):
+        ca.nlpsol("S", "ipopt", nlp, {"x_manifold": ca.Manifold.SE3(), "manifold_fallback": fb})
+
+  def test_embed(self):
+    M, nlp, q_target = attitude_problem()
+    S = self.solver(nlp, M)
+    # the embedding constraint is hidden from the user
+    self.assertEqual(S.size_in("lbg"), (0, 1))
+    self.assertEqual(S.size_out("lam_g"), (0, 1))
+    r = S(x0=[1, 0.1, 0, 0])
+    self.assertTrue(S.stats()["success"])
+    self.checkarray(M.minus(r["x"], q_target), ca.DM.zeros(3, 1), digits=6)
+    self.checkarray(M.constraint(r["x"]), ca.DM(0), digits=8)
+    self.checkarray(r["lam_x"], ca.DM.zeros(4, 1))
+
+  def test_embed_product(self):
+    M, nlp, q_target = pose_problem()
+    S = self.solver(nlp, M)
+    self.assertEqual(S.size_in("lbg"), (1, 1))
+    r = S(x0=[0, 0, 1, 0, 0, 0], ubx=[2.5, inf, inf, inf, inf, inf], lbg=-10, ubg=5)
+    self.checkarray(r["x"][:2], ca.DM([2.5, 2.5]), digits=4)
+    self.checkarray(r["g"], ca.DM(5), digits=4)
+    self.assertTrue(float(r["lam_g"]) > 0)
+    self.assertTrue(float(r["lam_x"][0]) > 0)
+    self.checkarray(r["lam_x"][2:], ca.DM.zeros(4, 1))
+    self.checkarray(M.component(1).minus(r["x"][2:], q_target), ca.DM.zeros(3, 1), digits=6)
+
+  def test_bounds_on_manifold(self):
+    M, nlp, _ = pose_problem()
+    S = self.solver(nlp, M)
+    # bounds on Euclidean entries are fine
+    S(x0=[0, 0, 1, 0, 0, 0], lbx=[-1, -1, -inf, -inf, -inf, -inf])
+    with self.assertRaisesRegex(Exception, "only allowed on the Euclidean entries"):
+      S(x0=[0, 0, 1, 0, 0, 0], ubx=[inf, inf, 2, inf, inf, inf])
+
+  def test_initial_guess_projection(self):
+    M, nlp, q_target = attitude_problem()
+    S = self.solver(nlp, M)
+    # x0 off the manifold is projected
+    r = S(x0=[2, 0.2, 0, 0])
+    self.checkarray(M.minus(r["x"], q_target), ca.DM.zeros(3, 1), digits=6)
+    # x0 that cannot be projected
+    with self.assertRaisesRegex(Exception, "cannot be projected"):
+      S(x0=[0, 0, 0, 0])
+
+  def test_equality_option(self):
+    M, nlp, _ = pose_problem()
+    S = self.solver(nlp, M, equality=[False])
+    S(x0=[0, 0, 1, 0, 0, 0], lbg=-10, ubg=5)
+    with self.assertRaisesRegex(Exception, "equality"):
+      self.solver(nlp, M, equality=[False, True])
+
+  def test_incompatible_options(self):
+    M, nlp, _ = pose_problem()
+    with self.assertRaisesRegex(Exception, "detect_simple_bounds"):
+      self.solver(nlp, M, detect_simple_bounds=True)
+    S = self.solver(nlp, M)
+    with self.assertRaisesRegex(Exception, "sensitivities"):
+      S.forward(1)
+    with self.assertRaisesRegex(Exception, "Code generation"):
+      S.generate("manifold_nlp_codegen.c")
+
+  def test_serialize(self):
+    M, nlp, q_target = pose_problem()
+    S = self.solver(nlp, M)
+    S2 = ca.Function.deserialize(S.serialize())
+    self.assertEqual(S2.size_in("lbg"), (1, 1))
+    args = dict(x0=[0, 0, 1, 0, 0, 0], ubx=[2.5, inf, inf, inf, inf, inf], lbg=-10, ubg=5)
+    r, r2 = S(**args), S2(**args)
+    for k in ["x", "g", "lam_g", "lam_x"]:
+      self.checkarray(r[k], r2[k], digits=8)
+    with self.assertRaisesRegex(Exception, "only allowed on the Euclidean entries"):
+      S2(x0=[0, 0, 1, 0, 0, 0], ubx=[inf, inf, 2, inf, inf, inf])
+
+
+if __name__ == '__main__':
+    unittest.main()

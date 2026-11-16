@@ -29,6 +29,7 @@
 #include "nlpsol.hpp"
 #include "oracle_function.hpp"
 #include "plugin_interface.hpp"
+#include "manifold.hpp"
 
 
 /// \cond INTERNAL
@@ -85,6 +86,26 @@ namespace casadi {
     Function detect_simple_bounds_parts_;
     std::vector<casadi_int> detect_simple_bounds_target_x_;
     std::vector<casadi_int> detect_simple_bounds_target_g_;
+
+    /// \name Optimization on manifolds
+    ///@{
+    /// Manifold of the decision variables (null if Euclidean)
+    Manifold x_manifold_;
+    /// What to do if the plugin has no native manifold support
+    std::string manifold_fallback_;
+    /// Number of embedding constraints appended to g by the "embed" fallback
+    casadi_int manifold_n_embed_;
+    /// Euclidean entries of x (simple bounds allowed)
+    std::vector<bool> manifold_mask_;
+    /// Projection onto the manifold, applied to x0
+    Function manifold_project_;
+    /// Identity element of the manifold (default initial guess)
+    std::vector<double> manifold_identity_;
+    /// Number of constraints seen by the user (ng_ minus embedding constraints)
+    casadi_int ng_user() const { return ng_ - manifold_n_embed_;}
+    /// Initialize the manifold data from x_manifold_
+    void init_manifold();
+    ///@}
 
     ///@{
     /** \brief Options
@@ -206,6 +227,13 @@ namespace casadi {
 
     /// Can discrete variables be treated
     virtual bool integer_support() const { return false;}
+
+    /** \brief Can the plugin optimize over a manifold (option x_manifold) natively?
+
+        Plugins that return true work in the tangent space of x_manifold
+        and update the iterate with Manifold::retract.
+    */
+    virtual bool supports_manifold() const { return false;}
 
     /** \brief Set the (persistent) work vectors
 
