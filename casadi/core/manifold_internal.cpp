@@ -353,29 +353,36 @@ namespace casadi {
   // CustomManifold
   // ---------------------------------------------------------------------------
 
-  namespace {
-    void check_io(const std::string& mname, const std::string& fname, const Function& f,
-                  const std::vector<casadi_int>& n_in, casadi_int n_out) {
-      std::string pre = "Manifold '" + mname + "': Function '" + fname + "' ";
-      casadi_assert(!f.is_null(), pre + "is null.");
-      casadi_assert(f.n_in()==n_in.size() && f.n_out()==1,
-        pre + "must have " + str(n_in.size()) + " input(s) and 1 output, got "
-        + str(f.n_in()) + " and " + str(f.n_out()) + ".");
-      for (casadi_int i=0; i<n_in.size(); ++i) {
-        casadi_assert(f.size1_in(i)==n_in[i] && f.size2_in(i)==1,
-          pre + "input " + str(i) + " must be " + str(n_in[i]) + "-by-1, got "
-          + f.sparsity_in(i).dim() + ".");
-      }
-      if (n_out>=0) {
-        casadi_assert(f.size1_out(0)==n_out && f.size2_out(0)==1,
-          pre + "output must be " + str(n_out) + "-by-1, got " + f.sparsity_out(0).dim() + ".");
-      } else {
-        casadi_assert(f.size2_out(0)==1 || f.numel_out(0)==0,
-          pre + "output must be a column vector, got " + f.sparsity_out(0).dim() + ".");
-      }
+  static void check_io(const std::string& mname, const std::string& fname, const Function& f,
+                const std::vector<casadi_int>& n_in, casadi_int n_out) {
+    std::string pre = "Manifold '" + mname + "': Function '" + fname + "' ";
+    casadi_assert(!f.is_null(), pre + "is null.");
+    casadi_assert(f.n_in()==n_in.size() && f.n_out()==1,
+      pre + "must have " + str(n_in.size()) + " input(s) and 1 output, got "
+      + str(f.n_in()) + " and " + str(f.n_out()) + ".");
+    for (casadi_int i=0; i<n_in.size(); ++i) {
+      casadi_assert(f.size1_in(i)==n_in[i] && f.size2_in(i)==1,
+        pre + "input " + str(i) + " must be " + str(n_in[i]) + "-by-1, got "
+        + f.sparsity_in(i).dim() + ".");
     }
+    if (n_out>=0) {
+      casadi_assert(f.size1_out(0)==n_out && f.size2_out(0)==1,
+        pre + "output must be " + str(n_out) + "-by-1, got " + f.sparsity_out(0).dim() + ".");
+    } else {
+      casadi_assert(f.size2_out(0)==1 || f.numel_out(0)==0,
+        pre + "output must be a column vector, got " + f.sparsity_out(0).dim() + ".");
+    }
+  }
 
-  } // namespace
+
+  static DM check_points_random(casadi_int n, casadi_int& seed) {
+    DM r = DM::zeros(n, 1);
+    for (casadi_int i=0; i<n; ++i) {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      r(i) = 2.0 * static_cast<double>(seed) / 2147483648.0 - 1.0;
+    }
+    return r;
+  }
 
   CustomManifold::CustomManifold(const std::string& name, const Function& retract,
                                  const Function& minus, const Dict& opts)
@@ -479,18 +486,13 @@ namespace casadi {
   void CustomManifold::check() const {
     // Deterministic pseudo-random numbers in [-1, 1]
     casadi_int seed = 12345;
-    auto rnd = [&seed](casadi_int n) {
-      DM r = DM::zeros(n, 1);
-      for (casadi_int i=0; i<n; ++i) {
-        seed = (seed * 1103515245 + 12345) % 2147483648;
-        r(i) = 2.0 * static_cast<double>(seed) / 2147483648.0 - 1.0;
-      }
-      return r;
-    };
     std::vector<DM> pts;
     if (has_identity_) pts.push_back(identity_);
     if (!project_.is_null()) {
-      for (casadi_int k=0; k<3; ++k) pts.push_back(project_(std::vector<DM>{rnd(nx_)}).at(0));
+      for (casadi_int k=0; k<3; ++k) {
+        DM r = check_points_random(nx_, seed);
+        pts.push_back(project_(std::vector<DM>{r}).at(0));
+      }
     }
     std::string pre = "Manifold '" + name_ + "': consistency check failed: ";
     std::string post = " (pass the option check=false to disable this check)";
@@ -502,7 +504,7 @@ namespace casadi {
       DM m0 = minus_(std::vector<DM>{x, x}).at(0);
       casadi_assert(norm_inf(m0).scalar() <= 1e-9*scale,
         pre + "minus(x, x) != 0 at x = " + str(x) + post);
-      DM dx = 1e-4 * rnd(ndx_);
+      DM dx = 1e-4 * check_points_random(ndx_, seed);
       DM y = retract_(std::vector<DM>{x, dx}).at(0);
       DM d = minus_(std::vector<DM>{y, x}).at(0);
       casadi_assert(norm_inf(d - dx).scalar() <= 1e-6*scale,
@@ -514,24 +516,22 @@ namespace casadi {
   // ProductManifold
   // ---------------------------------------------------------------------------
 
-  namespace {
-    casadi_int total_nx(const std::vector<Manifold>& c) {
-      casadi_int r = 0;
-      for (auto& m : c) {
-        casadi_assert(!m.is_null(), "Manifold::product: null component");
-        r += m.nx();
-      }
-      return r;
+  static casadi_int total_nx(const std::vector<Manifold>& c) {
+    casadi_int r = 0;
+    for (auto& m : c) {
+      casadi_assert(!m.is_null(), "Manifold::product: null component");
+      r += m.nx();
     }
-    casadi_int total_ndx(const std::vector<Manifold>& c) {
-      casadi_int r = 0;
-      for (auto& m : c) r += m.ndx();
-      return r;
-    }
-    SX vertcat_or_empty(const std::vector<SX>& v) {
-      return v.empty() ? SX(0, 1) : vertcat(v);
-    }
-  } // namespace
+    return r;
+  }
+  static casadi_int total_ndx(const std::vector<Manifold>& c) {
+    casadi_int r = 0;
+    for (auto& m : c) r += m.ndx();
+    return r;
+  }
+  static SX vertcat_or_empty(const std::vector<SX>& v) {
+    return v.empty() ? SX(0, 1) : vertcat(v);
+  }
 
   ProductManifold::ProductManifold(const std::vector<Manifold>& components)
       : ManifoldInternal("product", total_nx(components), total_ndx(components)),
