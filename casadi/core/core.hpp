@@ -55,6 +55,7 @@
 #include "graph_builder.hpp"
 #include "rootfinder.hpp"
 #include "linsol.hpp"
+#include "manifold.hpp"
 #include "dple.hpp"
 #include "expm.hpp"
 #include "interpolant.hpp"

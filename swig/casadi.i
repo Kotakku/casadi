@@ -713,6 +713,10 @@ namespace std {
     bool to_ptr(GUESTOBJECT *p, casadi::Function** m);
     GUESTOBJECT* from_ptr(const casadi::Function *a);
 
+    // Manifold
+    bool to_ptr(GUESTOBJECT *p, casadi::Manifold** m);
+    GUESTOBJECT* from_ptr(const casadi::Manifold *a);
+
     // SXElem
     bool to_ptr(GUESTOBJECT *p, casadi::SXElem** m);
     GUESTOBJECT* from_ptr(const casadi::SXElem *a);
@@ -1647,6 +1651,7 @@ namespace std {
     JULIA_ELTYPE(MX, julia_proxy_type("MX"))
     JULIA_ELTYPE(Function, julia_proxy_type("Function"))
     JULIA_ELTYPE(Linsol, julia_proxy_type("Linsol"))
+    JULIA_ELTYPE(Manifold, julia_proxy_type("Manifold"))
 #undef JULIA_ELTYPE
     template<typename M> struct julia_eltype<std::vector<M> > {
       static jl_value_t* get() { return jl_apply_array_type(julia_eltype<M>::get(), 1); }
@@ -1793,6 +1798,28 @@ namespace std {
 
     GUESTOBJECT* from_ptr(const Function *a) {
       return SWIG_NewPointerObj(new Function(*a), $descriptor(casadi::Function *), SWIG_POINTER_OWN);
+    }
+  } // namespace casadi
+}
+
+%fragment("casadi_manifold", "header", fragment="casadi_aux") {
+  namespace casadi {
+    bool to_ptr(GUESTOBJECT *p, Manifold** m) {
+      // Treat Null
+      if (is_null(p)) return false;
+
+      // Manifold already?
+      if (SWIG_IsOK(SWIG_ConvertPtr(p, reinterpret_cast<void**>(m),
+                                    $descriptor(casadi::Manifold*), 0))) {
+        return true;
+      }
+
+      // No match
+      return false;
+    }
+
+    GUESTOBJECT* from_ptr(const Manifold *a) {
+      return SWIG_NewPointerObj(new Manifold(*a), $descriptor(casadi::Manifold *), SWIG_POINTER_OWN);
     }
   } // namespace casadi
 }
@@ -2782,7 +2809,7 @@ namespace std {
 %fragment("casadi_extra", "header") {}
 
 // Collect all fragments
-%fragment("casadi_all", "header", fragment="casadi_aux,casadi_extra,casadi_bool,casadi_int,casadi_double,casadi_vector,casadi_vectorvector,casadi_function,casadi_generictype,casadi_string,casadi_slice,casadi_map,casadi_pair,casadi_sx,casadi_sxelem,casadi_mx,casadi_dmatrix,casadi_sparsity,casadi_imatrix") { }
+%fragment("casadi_all", "header", fragment="casadi_aux,casadi_extra,casadi_bool,casadi_int,casadi_double,casadi_vector,casadi_vectorvector,casadi_function,casadi_manifold,casadi_generictype,casadi_string,casadi_slice,casadi_map,casadi_pair,casadi_sx,casadi_sxelem,casadi_mx,casadi_dmatrix,casadi_sparsity,casadi_imatrix") { }
 
 #endif // SWIGXML
 
@@ -3201,6 +3228,7 @@ namespace std {
 %define PREC_STRING 180 %enddef
 %define PREC_FUNCTION 200 %enddef
 %define PREC_GENERICTYPE 201 %enddef
+%define PREC_MANIFOLD 202 %enddef
 
 #ifndef SWIGXML
 
@@ -3613,6 +3641,8 @@ class ArrayInterfaceMX(ArrayInterface[MX]):
 %casadi_typemaps("Function", "Function", "Function", "Function", PREC_FUNCTION, casadi::Function)
 %casadi_template_vec(LL "Function" LR, "Sequence[Function]", "list[Function]", "Function[]", PREC_FUNCTION, FunctionVector, casadi::Function)
 %casadi_template(LPAIR("Function","Function"), "tuple[Function, Function]", "tuple[Function, Function]", "[Function, Function]", PREC_FUNCTION, std::pair<casadi::Function, casadi::Function>)
+%casadi_typemaps("Manifold", "Manifold", "Manifold", "Manifold", PREC_MANIFOLD, casadi::Manifold)
+%casadi_template_vec(LL "Manifold" LR, "Sequence[Manifold]", "list[Manifold]", "Manifold[]", PREC_MANIFOLD, ManifoldVector, casadi::Manifold)
 %casadi_template(L_DICT, "Mapping[builtins.str, GenericType]", "dict[builtins.str, GenericType]", "Record<string, GenericType>", PREC_DICT, std::map<std::string, casadi::GenericType>)
 %casadi_template(LDICT(LL L_STR LR), "Mapping[builtins.str, Sequence[builtins.str]]", "dict[builtins.str, list[builtins.str]]", "Record<string, string[]>", PREC_DICT, std::map<std::string, std::vector<std::string> >)
 
@@ -6227,6 +6257,22 @@ namespace casadi{
 %include <casadi/core/graph_builder.hpp>
 %include <casadi/core/rootfinder.hpp>
 %include <casadi/core/linsol.hpp>
+%include <casadi/core/manifold.hpp>
+#ifdef SWIGPYTHON
+namespace casadi{
+%extend Manifold {
+  %pythoncode %{
+    def __setstate__(self, state):
+        self.__init__(Manifold.deserialize(state["serialization"]))
+
+    def __getstate__(self):
+        return {"serialization": self.serialize()}
+  %}
+  %stub_method0(__getstate__, %arg(dict[builtins.str, Any]))
+  %stub_method(__setstate__, None, state: Mapping[builtins.str, Any])
+}
+} // namespace casadi
+#endif // SWIGPYTHON
 %include <casadi/core/dple.hpp>
 %include <casadi/core/expm.hpp>
 %include <casadi/core/interpolant.hpp>

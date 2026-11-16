@@ -35,6 +35,7 @@
 namespace casadi {
   class Slice;
   class Linsol;
+  class Manifold;
   class Sparsity;
   class Function;
   class MX;
@@ -90,6 +91,7 @@ namespace casadi {
     void unpack(MX& e);
     void unpack(SXElem& e);
     void unpack(Linsol& e);
+    void unpack(Manifold& e);
     template <class T>
     void unpack(Matrix<T>& e) {
       e = Matrix<T>::deserialize(*this);
@@ -239,6 +241,7 @@ namespace casadi {
     void pack(const MX& e);
     void pack(const SXElem& e);
     void pack(const Linsol& e);
+    void pack(const Manifold& e);
     template <class T>
     void pack(const Matrix<T>& e) {
       e.serialize(*this);
