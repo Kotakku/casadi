@@ -101,10 +101,12 @@ namespace casadi {
         "OCP horizon"}},
       {"nx",
        {OT_INTVECTOR,
-        "Number of states, length N+1"}},
+        "Number of states, length N+1. With option x_manifold, these are entries of the "
+        "primal vector x (e.g. 4 for a quaternion); fatrop itself works with the tangent "
+        "dimensions, which are reported in the stats."}},
       {"nu",
        {OT_INTVECTOR,
-        "Number of controls, length N+1"}},
+        "Number of controls, length N+1 (entries of the primal vector x, see nx)"}},
       {"ng",
        {OT_INTVECTOR,
         "Number of non-dynamic constraints, length N+1"}},
@@ -113,7 +115,9 @@ namespace casadi {
         "Options to be passed to fatrop"}},
       {"structure_detection",
        {OT_STRING,
-        "NONE | auto | manual"}},
+        "NONE | auto | manual. With option x_manifold, write the dynamics of a manifold "
+        "element in its tangent space, e.g. M.minus(x_{k+1}, F(x_k, u_k)) == 0; the dense "
+        "dependence on the tangent of x_{k+1} is normalized to the identity internally."}},
       {"convexify_strategy",
        {OT_STRING,
         "NONE|regularize|eigen-reflect|eigen-clip. "
