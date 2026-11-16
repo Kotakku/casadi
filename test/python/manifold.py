@@ -135,8 +135,8 @@ class ManifoldTests(casadiTestCase):
   def test_get_function(self):
     M = ca.Manifold.Euclidean(2)
     self.assertEqual(list(ca.Manifold.function_names()),
-                     ["retract", "minus", "project", "constraint", "jac_retract_dx",
-                      "jac_minus_y", "compose", "inverse", "exp", "log", "act", "hat",
+                     ["retract", "minus", "defect", "project", "constraint",
+                      "jac_retract_dx", "jac_minus_y", "compose", "inverse", "exp", "log", "act", "hat",
                       "vee", "as_matrix", "Adj", "Jr", "Jl", "Jr_inv", "Jl_inv"])
     f = M.get_function("retract")
     self.assertTrue(isinstance(f, ca.Function))
@@ -647,6 +647,30 @@ class ManifoldJacobianTests(casadiTestCase):
       self.checkarray(J, ref(x), str(M))
       # minus(retract(x, dx), x) = dx  =>  jac_minus_y(x) jac_retract_dx(x) = I
       self.checkarray(ca.mtimes(J, M.jac_retract_dx(x)), ca.DM.eye(M.ndx()), str(M))
+
+  def test_defect(self):
+    """defect(y, x): zero iff y = x, first-order equal to minus around y = x"""
+    np.random.seed(14)
+    for M in self.manifolds():
+      x = M.project(ca.DM(np.random.randn(M.nx(), 1)))
+      self.checkarray(M.defect(x, x), ca.DM.zeros(M.ndx(), 1), str(M))
+      dx = ca.SX.sym("dx", M.ndx())
+      J = ca.Function("J", [dx], [ca.jacobian(M.defect(M.retract(x, dx), x), dx)])
+      self.checkarray(J(ca.DM.zeros(M.ndx(), 1)), ca.DM.eye(M.ndx()), str(M))
+      # agrees with minus up to second order
+      d = ca.DM(np.random.uniform(-1, 1, (M.ndx(), 1)))*1e-4
+      y = M.retract(x, d)
+      self.assertTrue(float(ca.norm_inf(M.defect(y, x) - M.minus(y, x))) < 1e-6, str(M))
+      # columnwise and symbolic
+      X = ca.horzcat(x, y)
+      self.checkarray(M.defect(X, ca.repmat(x, 1, 2)), ca.horzcat(M.defect(x, x), M.defect(y, x)))
+      ys = ca.MX.sym("y", M.nx())
+      f = ca.Function("f", [ys], [M.defect(ys, x)])
+      self.checkarray(f(y), M.defect(y, x), str(M))
+    # double cover: q and -q are the same rotation
+    SO3 = ca.Manifold.SO3()
+    q = SO3.exp(ca.DM([0.3, -0.2, 0.5]))
+    self.checkarray(SO3.defect(-q, q), ca.DM.zeros(3, 1))
 
   def test_chain_rule(self):
     """Tangent-space gradient of f(retract(x, dx)) at dx = 0 from the ambient gradient"""

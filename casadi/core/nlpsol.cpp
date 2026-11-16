@@ -1678,50 +1678,97 @@ namespace casadi {
     return leaves;
   }
 
-  template<typename X>
-  static Function nlpsol_manifold_local_oracle(const Function& oracle, const Manifold& M,
-      casadi_int nd, const std::vector<casadi_int>& tan_idx,
-      const std::vector<casadi_int>& pad_idx) {
-    X x = X::sym("x", oracle.sparsity_in(NL_X));
-    X p = X::sym("p", oracle.sparsity_in(NL_P));
-    X d = X::sym("d", nd);
-    X dt = tan_idx.empty() ? X(0, 1) : X(d(tan_idx));
-    std::vector<X> fg = oracle(std::vector<X>{reshape(M.retract(vec(x), dt), x.size()), p});
-    X f = fg.at(NL_F);
-    if (!pad_idx.empty()) f += 0.5*sumsqr(d(pad_idx));
-    return Function("nlp_local", {x, p, d}, {f, fg.at(NL_G)},
-                    {"x", "p", "d"}, {"f", "g"});
+  void Nlpsol::manifold_set_local_coordinates(casadi_int nd,
+      const std::vector<casadi_int>& tan_idx, const std::vector<casadi_int>& pad_idx) {
+    manifold_nd_ = nd;
+    manifold_pad_idx_ = pad_idx;
+    SX x = SX::sym("x", nx_), w = SX::sym("w", nx_), d = SX::sym("d", nd);
+    SX dt = tan_idx.empty() ? SX(0, 1) : SX(d(tan_idx));
+    SX r = x_manifold_.retract(x, dt);
+    SX zero = SX::zeros(nd);
+    // T(x) = d retract(x, d) / d d at d = 0
+    SX T = substitute(SX::jacobian(r, d), d, zero);
+    manifold_T_ = Function("manifold_T", {x}, {T}, {"x"}, {"T"});
+    // C(x, w) = d^2 (w' retract(x, d)) / d d^2 at d = 0
+    SX C = substitute(SX::hessian(SX::dot(w, r), d), d, zero);
+    manifold_C_ = Function("manifold_C", {x, w}, {C}, {"x", "w"}, {"C"});
   }
 
-  Function Nlpsol::manifold_local_oracle(casadi_int nd, const std::vector<casadi_int>& tan_idx,
-                                         const std::vector<casadi_int>& pad_idx) const {
-    return oracle_.is_a("SXFunction")
-      ? nlpsol_manifold_local_oracle<SX>(oracle_, x_manifold_, nd, tan_idx, pad_idx)
-      : nlpsol_manifold_local_oracle<MX>(oracle_, x_manifold_, nd, tan_idx, pad_idx);
-  }
-
-  void Nlpsol::manifold_create_function(const Function& local, const std::string& fname,
+  void Nlpsol::manifold_create_function(const std::string& fname,
                                         const std::vector<std::string>& s_in,
                                         const std::vector<std::string>& s_out,
                                         const Function::AuxOut& aux) {
-    std::vector<std::string> s_in_d = s_in;
-    s_in_d.push_back("d");
-    Function f = local.factory(fname + "_local", s_in_d, s_out, aux);
-    // Fix d = 0
-    std::vector<MX> arg = f.mx_in();
-    std::vector<MX> call_arg = arg;
-    call_arg.back() = MX::zeros(f.sparsity_in(f.n_in()-1));
-    arg.pop_back();
-    Function ret(fname, arg, f(call_arg), s_in, f.name_out());
-    if (local.is_a("SXFunction")) ret = ret.expand();
-    set_function(ret, fname);
+    casadi_assert(!manifold_T_.is_null(), "manifold_set_local_coordinates has not been called");
+    // Corresponding derivatives with respect to x
+    std::vector<std::string> amb_out;
+    casadi_int i_grad_gamma = -1;
+    for (const std::string& n : s_out) {
+      if (n=="f" || n=="g") {
+        amb_out.push_back(n);
+      } else if (n=="grad:f:d") {
+        amb_out.push_back("grad:f:x");
+      } else if (n=="jac:g:d") {
+        amb_out.push_back("jac:g:x");
+      } else if (n=="grad:gamma:d") {
+        i_grad_gamma = amb_out.size();
+        amb_out.push_back("grad:gamma:x");
+      } else if (n=="hess:gamma:d:d") {
+        amb_out.push_back("hess:gamma:x:x");
+      } else {
+        casadi_error("manifold_create_function: unsupported output '" + n + "'");
+      }
+    }
+    bool hess = std::find(s_out.begin(), s_out.end(), "hess:gamma:d:d") != s_out.end();
+    if (hess && i_grad_gamma<0) {
+      // The curvature of the retraction needs the gradient of the Lagrangian
+      i_grad_gamma = amb_out.size();
+      amb_out.push_back("grad:gamma:x");
+    }
+    Function amb = oracle_.factory(fname + "_ambient", s_in, amb_out, aux);
+
+    // Assemble with the chain rule
+    std::vector<MX> arg = amb.mx_in();
+    std::vector<MX> res = amb(arg);
+    auto input = [&](const std::string& n) -> MX {
+      auto it = std::find(s_in.begin(), s_in.end(), n);
+      casadi_assert(it!=s_in.end(), "manifold_create_function: missing input '" + n + "'");
+      return arg.at(it - s_in.begin());
+    };
+    MX x = input("x");
+    MX T = manifold_T_(std::vector<MX>{x}).at(0);
+    std::vector<MX> out;
+    for (casadi_int i=0; i<s_out.size(); ++i) {
+      const std::string& n = s_out[i];
+      if (n=="f" || n=="g") {
+        out.push_back(res[i]);
+      } else if (n=="grad:f:d" || n=="grad:gamma:d") {
+        // Gradients are dense vectors, as returned by the factory for x
+        out.push_back(densify(mtimes(T.T(), res[i])));
+      } else if (n=="jac:g:d") {
+        out.push_back(mtimes(res[i], T));
+      } else {  // hess:gamma:d:d
+        MX H = mtimes(T.T(), mtimes(res[i], T));
+        H += manifold_C_(std::vector<MX>{x, res.at(i_grad_gamma)}).at(0);
+        if (!manifold_pad_idx_.empty()) {
+          // 0.5*|d_pad|^2 in f, scaled by lam:f
+          std::vector<double> e(manifold_pad_idx_.size(), 1.);
+          DM I_pad = DM::triplet(manifold_pad_idx_, manifold_pad_idx_, e,
+                                 manifold_nd_, manifold_nd_);
+          H += input("lam:f")*MX(I_pad);
+        }
+        out.push_back(H);
+      }
+    }
+    Function ret(fname, arg, out, s_in, s_out);
+    if (oracle_.is_a("SXFunction")) ret = ret.expand();
+    set_function(ret, fname, true);
   }
 
   void Nlpsol::manifold_create_step(casadi_int nd, const std::vector<casadi_int>& tan_idx) {
     SX x = SX::sym("x", nx_), dx = SX::sym("dx", nd), t = SX::sym("t");
     SX dt = tan_idx.empty() ? SX(0, 1) : SX(dx(tan_idx));
     set_function(Function("nlp_step", {x, dx, t}, {x_manifold_.retract(x, t*dt)},
-                          {"x", "dx", "t"}, {"x_next"}), "nlp_step");
+                          {"x", "dx", "t"}, {"x_next"}), "nlp_step", true);
   }
 
   void Nlpsol::init_manifold() {

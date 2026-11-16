@@ -23,6 +23,7 @@
 import casadi as ca
 import numpy as np
 import os
+import tempfile
 import unittest
 from helpers import casadiTestCase
 
@@ -570,6 +571,23 @@ class ManifoldFatropTests(casadiTestCase):
     flags = [] if os.name == "nt" else ["-Wno-strict-prototypes"]
     self.check_codegen(F, args, std="c99", extralibs=["fatrop", "blasfeo"], extra_options=flags,
                        digits=8)
+
+  def test_jit(self):
+    """With jit, the tangent-space derivative functions are compiled as well"""
+    if not ca.Importer.has_plugin("shell"):
+      self.skipTest("shell compiler not available")
+    nlp, M, args = attitude_ocp(N=6)
+    opts = dict(FATROP_OPTS, x_manifold=M, structure_detection="auto",
+                equality=[True]*nlp["g"].shape[0])
+    r = ca.nlpsol("F", "fatrop", nlp, opts)(**args)
+    with tempfile.TemporaryDirectory() as d:
+      F = ca.nlpsol("F", "fatrop", nlp, dict(opts, jit=True, compiler="shell",
+                                             jit_options={"directory": d}))
+      for fname in ["nlp_grad_f", "nlp_jac_g", "nlp_hess_l", "nlp_step"]:
+        self.assertTrue(F.get_function(fname).is_a("External", True), fname)
+      rj = F(**args)
+      self.assertTrue(F.stats()["success"])
+      self.checkarray(rj["x"], r["x"], digits=8)
 
   def test_serialize_and_codegen(self):
     nlp, M, args = attitude_ocp(N=6)

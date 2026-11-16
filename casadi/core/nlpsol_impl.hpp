@@ -116,23 +116,33 @@ namespace casadi {
     /// Leaves of x_manifold_ in the order of x
     std::vector<ManifoldLeaf> manifold_leaves() const;
 
-    /** \brief Local parametrization of the NLP around x for solvers with native manifold support
+    /** \brief Local coordinates d around x for solvers with native manifold support
 
-        Returns (x, p, d) -> (f, g) evaluated at retract(x, d(tan_idx)), with
-        0.5*|d(pad_idx)|^2 added to f. d has length nd.
+        The NLP is locally parametrized as f(retract(x, d(tan_idx))) and
+        g(retract(x, d(tan_idx))) (plus 0.5*|d(pad_idx)|^2 in f); d has length nd.
+        Prepares the derivatives of the retraction at d = 0: T(x) = d retract / d d
+        (nx-by-nd) and the curvature C(x, w) = sum_i w_i d^2 retract_i / d d^2 (nd-by-nd).
     */
-    Function manifold_local_oracle(casadi_int nd, const std::vector<casadi_int>& tan_idx,
-                                   const std::vector<casadi_int>& pad_idx) const;
+    void manifold_set_local_coordinates(casadi_int nd, const std::vector<casadi_int>& tan_idx,
+                                        const std::vector<casadi_int>& pad_idx);
 
-    /** \brief Register a derivative of a local oracle at d = 0
+    /** \brief Register derivatives of the NLP in the local coordinates at d = 0
 
-        Creates local.factory(...) with inputs s_in + {"d"}, fixes d = 0 and registers the
-        result under fname with inputs s_in (expanded if the local oracle is an SX function).
+        Outputs "f", "g", "grad:f:d", "jac:g:d", "grad:gamma:d" and "hess:gamma:d:d" (with
+        gamma = lam:f * f + lam:g' * g) are assembled by the chain rule from the derivatives
+        of the oracle with respect to x, which keeps the structure of the oracle:
+          grad_d = T' grad_x,  jac_d = jac_x T,
+          hess_d = T' hess_x T + C(x, grad_x gamma) + lam:f * I(pad_idx).
     */
-    void manifold_create_function(const Function& local, const std::string& fname,
+    void manifold_create_function(const std::string& fname,
                                   const std::vector<std::string>& s_in,
                                   const std::vector<std::string>& s_out,
                                   const Function::AuxOut& aux=Function::AuxOut());
+
+    /// Derivatives of the retraction for the local coordinates (manifold_set_local_coordinates)
+    Function manifold_T_, manifold_C_;
+    std::vector<casadi_int> manifold_pad_idx_;
+    casadi_int manifold_nd_ = 0;
 
     /// Register nlp_step: (x, dx[nd], t) -> retract(x, t*dx(tan_idx))
     void manifold_create_step(casadi_int nd, const std::vector<casadi_int>& tan_idx);

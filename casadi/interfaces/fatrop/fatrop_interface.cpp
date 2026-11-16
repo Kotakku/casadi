@@ -202,11 +202,11 @@ namespace casadi {
     casadi_int nt = manifold_ ? x_manifold_.ndx() : nx_;
     if (manifold_) {
       std::vector<casadi_int> tan_idx = range(nt);
-      Function local = manifold_local_oracle(nt, tan_idx, {});
-      manifold_create_function(local, "nlp_grad_f", {"x", "p"}, {"grad:f:d"});
-      manifold_create_function(local, "nlp_jac_g", {"x", "p"}, {"g", "jac:g:d"});
+      manifold_set_local_coordinates(nt, tan_idx, {});
+      manifold_create_function("nlp_grad_f", {"x", "p"}, {"grad:f:d"});
+      manifold_create_function("nlp_jac_g", {"x", "p"}, {"g", "jac:g:d"});
       if (exact_hessian_) {
-        manifold_create_function(local, "nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
+        manifold_create_function("nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
                                  {"grad:gamma:d", "hess:gamma:d:d"}, {{"gamma", {"f", "g"}}});
       }
       manifold_create_step(nt, tan_idx);

@@ -200,6 +200,16 @@ namespace casadi {
     return call_columnwise<MX>(*this, "minus", {y, x});
   }
 
+  DM Manifold::defect(const DM& y, const DM& x) const {
+    return call_columnwise<DM>(*this, "defect", {y, x});
+  }
+  SX Manifold::defect(const SX& y, const SX& x) const {
+    return call_columnwise<SX>(*this, "defect", {y, x});
+  }
+  MX Manifold::defect(const MX& y, const MX& x) const {
+    return call_columnwise<MX>(*this, "defect", {y, x});
+  }
+
   DM Manifold::project(const DM& x) const {
     return call_columnwise<DM>(*this, "project", {x});
   }
