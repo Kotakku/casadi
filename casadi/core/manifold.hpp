@@ -100,6 +100,13 @@ namespace casadi {
         ambient vectors, likewise for the tangent vector.
     */
     static Manifold product(const std::vector<Manifold>& components);
+
+    /** \brief Rotation group SO(3) as unit quaternions
+
+        Ambient representation [w, x, y, z] (Hamilton convention, scalar first),
+        nx = 4, ndx = 3. Note that Eigen and scipy store [x, y, z, w].
+    */
+    static Manifold SO3();
     ///@}
 
     /// \name Information
@@ -115,6 +122,9 @@ namespace casadi {
 
     /// Is the manifold (globally) Euclidean, i.e. retract(x, dx) = x + dx ?
     bool is_euclidean() const;
+
+    /// Is the manifold a Lie group (are the Lie group operations available)?
+    bool is_lie_group() const;
 
     /** \brief Which entries of the ambient vector are Euclidean (length nx)
 
@@ -174,7 +184,91 @@ namespace casadi {
     DM constraint(const DM& x) const;
     SX constraint(const SX& x) const;
     MX constraint(const MX& x) const;
+
+    /** \brief Jacobian of retract(x, dx) with respect to dx at dx = 0 (nx-by-ndx)
+
+        Maps tangent perturbations to ambient perturbations; used to pull
+        ambient-space derivatives back to the tangent space. */
+    DM jac_retract_dx(const DM& x) const;
+    SX jac_retract_dx(const SX& x) const;
+    MX jac_retract_dx(const MX& x) const;
+
+    /** \brief Jacobian of minus(y, x) with respect to y at y = x (ndx-by-nx) */
+    DM jac_minus_y(const DM& x) const;
+    SX jac_minus_y(const SX& x) const;
+    MX jac_minus_y(const MX& x) const;
     ///@}
+
+    /// \name Lie group operations (only if is_lie_group())
+    ///@{
+    /** \brief Group composition a * b */
+    DM compose(const DM& a, const DM& b) const;
+    SX compose(const SX& a, const SX& b) const;
+    MX compose(const MX& a, const MX& b) const;
+
+    /** \brief Group inverse a^-1 */
+    DM inverse(const DM& a) const;
+    SX inverse(const SX& a) const;
+    MX inverse(const MX& a) const;
+
+    /** \brief Exponential map Exp: tangent vector (ndx) -> group element (nx) */
+    DM exp(const DM& v) const;
+    SX exp(const SX& v) const;
+    MX exp(const MX& v) const;
+
+    /** \brief Logarithm map Log: group element (nx) -> tangent vector (ndx)
+
+        For SO3, the shortest rotation is returned (q and -q are identified). */
+    DM log(const DM& a) const;
+    SX log(const SX& a) const;
+    MX log(const MX& a) const;
+
+    /** \brief Action of a on a point p (SO3: R p, SE3: R p + t, R^n: p + a) */
+    DM act(const DM& a, const DM& p) const;
+    SX act(const SX& a, const SX& p) const;
+    MX act(const MX& a, const MX& p) const;
+
+    /** \brief Tangent vector to Lie algebra matrix (e.g. skew-symmetric matrix for SO3) */
+    DM hat(const DM& v) const;
+    SX hat(const SX& v) const;
+    MX hat(const MX& v) const;
+
+    /** \brief Lie algebra matrix to tangent vector (inverse of hat) */
+    DM vee(const DM& V) const;
+    SX vee(const SX& V) const;
+    MX vee(const MX& V) const;
+
+    /** \brief Matrix representation of a group element (SO3: 3x3, SE3: 4x4) */
+    DM as_matrix(const DM& a) const;
+    SX as_matrix(const SX& a) const;
+    MX as_matrix(const MX& a) const;
+
+    /** \brief Adjoint matrix: a * Exp(v) = Exp(Adj(a) v) * a */
+    DM Adj(const DM& a) const;
+    SX Adj(const SX& a) const;
+    MX Adj(const MX& a) const;
+
+    /** \brief Right Jacobian: Exp(v + e) = Exp(v) * Exp(Jr(v) e) + O(|e|^2) */
+    DM Jr(const DM& v) const;
+    SX Jr(const SX& v) const;
+    MX Jr(const MX& v) const;
+
+    /** \brief Left Jacobian: Exp(v + e) = Exp(Jl(v) e) * Exp(v) + O(|e|^2) */
+    DM Jl(const DM& v) const;
+    SX Jl(const SX& v) const;
+    MX Jl(const MX& v) const;
+
+    /** \brief Inverse of the right Jacobian */
+    DM Jr_inv(const DM& v) const;
+    SX Jr_inv(const SX& v) const;
+    MX Jr_inv(const MX& v) const;
+
+    /** \brief Inverse of the left Jacobian */
+    DM Jl_inv(const DM& v) const;
+    SX Jl_inv(const SX& v) const;
+    MX Jl_inv(const MX& v) const;
+    ///@}
+
 
     /** \brief Get the Function implementing an operation
 

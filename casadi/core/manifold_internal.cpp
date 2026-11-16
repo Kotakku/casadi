@@ -25,7 +25,32 @@
 
 #include "manifold_internal.hpp"
 
+#include <algorithm>
+
 namespace casadi {
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  SX manifold_series_switch(const SX& t2, double thr, const std::vector<double>& c,
+                            const std::function<SX(const SX&)>& exact) {
+    SX small = t2 < thr;
+    // Safe argument: the exact branch never sees the singular point
+    SX t2_safe = if_else(small, SX(thr), t2);
+    SX series = 0;
+    for (auto it = c.rbegin(); it != c.rend(); ++it) series = series * t2 + *it;
+    return if_else(small, series, exact(sqrt(t2_safe)));
+  }
+
+  SX manifold_skew(const SX& v) {
+    casadi_assert_dev(v.size1()==3 && v.size2()==1);
+    SX r = SX::zeros(3, 3);
+    r(0, 1) = -v(2); r(0, 2) = v(1);
+    r(1, 0) = v(2);  r(1, 2) = -v(0);
+    r(2, 0) = -v(1); r(2, 1) = v(0);
+    return r;
+  }
 
   // ---------------------------------------------------------------------------
   // ManifoldInternal
@@ -69,6 +94,10 @@ namespace casadi {
     return {0, ndx_};
   }
 
+  casadi_int ManifoldInternal::point_dim() const {
+    return nx_;
+  }
+
   SX ManifoldInternal::project_sx(const SX& x) const {
     return x;
   }
@@ -77,32 +106,136 @@ namespace casadi {
     return SX(0, 1);
   }
 
+  SX ManifoldInternal::jac_retract_dx_sx(const SX& x) const {
+    SX dx = SX::sym("dx", ndx_);
+    SX J = jacobian(retract_sx(x, dx), dx);
+    return substitute(J, dx, SX::zeros(ndx_));
+  }
+
+  SX ManifoldInternal::jac_minus_y_sx(const SX& x) const {
+    SX y = SX::sym("y", nx_);
+    SX J = jacobian(minus_sx(y, x), y);
+    return substitute(J, y, x);
+  }
+
+  void ManifoldInternal::lie_error(const std::string& op) const {
+    if (!is_lie_group()) {
+      casadi_error("Manifold::" + op + ": " + repr() + " is not a Lie group.");
+    }
+    casadi_error("Manifold::" + op + ": not available for " + repr() + ".");
+  }
+
+  SX ManifoldInternal::compose_sx(const SX& a, const SX& b) const { lie_error("compose");}
+  SX ManifoldInternal::inverse_sx(const SX& a) const { lie_error("inverse");}
+  SX ManifoldInternal::exp_sx(const SX& v) const { lie_error("exp");}
+  SX ManifoldInternal::log_sx(const SX& a) const { lie_error("log");}
+  SX ManifoldInternal::act_sx(const SX& a, const SX& p) const { lie_error("act");}
+  SX ManifoldInternal::hat_sx(const SX& v) const { lie_error("hat");}
+  SX ManifoldInternal::vee_sx(const SX& V) const { lie_error("vee");}
+  SX ManifoldInternal::as_matrix_sx(const SX& a) const { lie_error("as_matrix");}
+
+  SX ManifoldInternal::Adj_sx(const SX& a) const {
+    if (!is_lie_group()) lie_error("Adj");
+    // Adj(a) v = Log(a Exp(v) a^-1), linearized at v = 0
+    SX v = SX::sym("v", ndx_);
+    SX e = log_sx(compose_sx(compose_sx(a, exp_sx(v)), inverse_sx(a)));
+    return substitute(jacobian(e, v), v, SX::zeros(ndx_));
+  }
+
+  SX ManifoldInternal::Jr_sx(const SX& v) const {
+    if (!is_lie_group()) lie_error("Jr");
+    // Exp(v + e) = Exp(v) Exp(Jr(v) e) + O(e^2)
+    SX e = SX::sym("e", ndx_);
+    SX d = log_sx(compose_sx(inverse_sx(exp_sx(v)), exp_sx(v + e)));
+    return substitute(jacobian(d, e), e, SX::zeros(ndx_));
+  }
+
+  SX ManifoldInternal::Jl_sx(const SX& v) const {
+    if (!is_lie_group()) lie_error("Jl");
+    return Jr_sx(-v);
+  }
+
+  SX ManifoldInternal::Jr_inv_sx(const SX& v) const {
+    if (!is_lie_group()) lie_error("Jr_inv");
+    // Log(Exp(v) Exp(e)) = v + Jr(v)^-1 e + O(e^2)
+    SX e = SX::sym("e", ndx_);
+    SX d = log_sx(compose_sx(exp_sx(v), exp_sx(e)));
+    return substitute(jacobian(d, e), e, SX::zeros(ndx_));
+  }
+
+  SX ManifoldInternal::Jl_inv_sx(const SX& v) const {
+    if (!is_lie_group()) lie_error("Jl_inv");
+    return Jr_inv_sx(-v);
+  }
+
   std::vector<std::string> ManifoldInternal::function_names() {
-    return {"retract", "minus", "project", "constraint"};
+    return {"retract", "minus", "project", "constraint", "jac_retract_dx", "jac_minus_y",
+            "compose", "inverse", "exp", "log", "act", "hat", "vee", "as_matrix",
+            "Adj", "Jr", "Jl", "Jr_inv", "Jl_inv"};
+  }
+
+  bool ManifoldInternal::is_lie_function(const std::string& fname) {
+    std::vector<std::string> n = function_names();
+    return std::find(n.begin() + 6, n.end(), fname) != n.end();
   }
 
   Function ManifoldInternal::create_function(const std::string& fname) const {
+    std::string fn = name_ + "_" + fname;
     SX x = SX::sym("x", nx_);
+    SX a = SX::sym("a", nx_);
+    SX v = SX::sym("v", ndx_);
     if (fname=="retract") {
       SX dx = SX::sym("dx", ndx_);
-      return Function(name_ + "_retract", {x, dx}, {retract_sx(x, dx)},
-                      {"x", "dx"}, {"x_next"});
+      return Function(fn, {x, dx}, {retract_sx(x, dx)}, {"x", "dx"}, {"x_next"});
     } else if (fname=="minus") {
       SX y = SX::sym("y", nx_);
-      return Function(name_ + "_minus", {y, x}, {minus_sx(y, x)},
-                      {"y", "x"}, {"dx"});
+      return Function(fn, {y, x}, {minus_sx(y, x)}, {"y", "x"}, {"dx"});
     } else if (fname=="project") {
-      return Function(name_ + "_project", {x}, {project_sx(x)},
-                      {"x"}, {"x_proj"});
+      return Function(fn, {x}, {project_sx(x)}, {"x"}, {"x_proj"});
     } else if (fname=="constraint") {
-      return Function(name_ + "_constraint", {x}, {constraint_sx(x)},
-                      {"x"}, {"c"});
+      return Function(fn, {x}, {constraint_sx(x)}, {"x"}, {"c"});
+    } else if (fname=="jac_retract_dx") {
+      return Function(fn, {x}, {jac_retract_dx_sx(x)}, {"x"}, {"jac"});
+    } else if (fname=="jac_minus_y") {
+      return Function(fn, {x}, {jac_minus_y_sx(x)}, {"x"}, {"jac"});
+    } else if (fname=="compose") {
+      SX b = SX::sym("b", nx_);
+      return Function(fn, {a, b}, {compose_sx(a, b)}, {"a", "b"}, {"ab"});
+    } else if (fname=="inverse") {
+      return Function(fn, {a}, {inverse_sx(a)}, {"a"}, {"a_inv"});
+    } else if (fname=="exp") {
+      return Function(fn, {v}, {exp_sx(v)}, {"v"}, {"a"});
+    } else if (fname=="log") {
+      return Function(fn, {a}, {log_sx(a)}, {"a"}, {"v"});
+    } else if (fname=="act") {
+      SX p = SX::sym("p", point_dim());
+      return Function(fn, {a, p}, {act_sx(a, p)}, {"a", "p"}, {"ap"});
+    } else if (fname=="hat") {
+      return Function(fn, {v}, {hat_sx(v)}, {"v"}, {"V"});
+    } else if (fname=="vee") {
+      casadi_int m = matrix_dim();
+      if (m<0) lie_error("vee");
+      SX V = SX::sym("V", m, m);
+      return Function(fn, {V}, {vee_sx(V)}, {"V"}, {"v"});
+    } else if (fname=="as_matrix") {
+      return Function(fn, {a}, {as_matrix_sx(a)}, {"a"}, {"A"});
+    } else if (fname=="Adj") {
+      return Function(fn, {a}, {Adj_sx(a)}, {"a"}, {"Adj"});
+    } else if (fname=="Jr") {
+      return Function(fn, {v}, {Jr_sx(v)}, {"v"}, {"Jr"});
+    } else if (fname=="Jl") {
+      return Function(fn, {v}, {Jl_sx(v)}, {"v"}, {"Jl"});
+    } else if (fname=="Jr_inv") {
+      return Function(fn, {v}, {Jr_inv_sx(v)}, {"v"}, {"Jr_inv"});
+    } else if (fname=="Jl_inv") {
+      return Function(fn, {v}, {Jl_inv_sx(v)}, {"v"}, {"Jl_inv"});
     }
     casadi_error("Manifold::get_function: unknown function '" + fname
                  + "'. Available: " + str(function_names()));
   }
 
   Function ManifoldInternal::get_function(const std::string& fname) const {
+    if (is_lie_function(fname) && !is_lie_group()) lie_error(fname);
 #ifdef CASADI_WITH_THREAD
     std::lock_guard<std::mutex> lock(mtx_);
 #endif // CASADI_WITH_THREAD
@@ -114,11 +247,23 @@ namespace casadi {
   }
 
   // ---------------------------------------------------------------------------
+  // LieGroupInternal
+  // ---------------------------------------------------------------------------
+
+  SX LieGroupInternal::retract_sx(const SX& x, const SX& dx) const {
+    return compose_sx(x, exp_sx(dx));
+  }
+
+  SX LieGroupInternal::minus_sx(const SX& y, const SX& x) const {
+    return log_sx(compose_sx(inverse_sx(x), y));
+  }
+
+  // ---------------------------------------------------------------------------
   // EuclideanManifold
   // ---------------------------------------------------------------------------
 
   EuclideanManifold::EuclideanManifold(casadi_int n)
-      : ManifoldInternal("R" + str(n), n, n) {
+      : LieGroupInternal("R" + str(n), n, n) {
   }
 
   std::string EuclideanManifold::repr() const {
@@ -137,13 +282,35 @@ namespace casadi {
     return DM::zeros(nx_, 1);
   }
 
-  SX EuclideanManifold::retract_sx(const SX& x, const SX& dx) const {
-    return x + dx;
+  SX EuclideanManifold::retract_sx(const SX& x, const SX& dx) const { return x + dx;}
+  SX EuclideanManifold::minus_sx(const SX& y, const SX& x) const { return y - x;}
+  SX EuclideanManifold::compose_sx(const SX& a, const SX& b) const { return a + b;}
+  SX EuclideanManifold::inverse_sx(const SX& a) const { return -a;}
+  SX EuclideanManifold::exp_sx(const SX& v) const { return v;}
+  SX EuclideanManifold::log_sx(const SX& a) const { return a;}
+  SX EuclideanManifold::act_sx(const SX& a, const SX& p) const { return p + a;}
+
+  SX EuclideanManifold::hat_sx(const SX& v) const {
+    SX r = SX::zeros(nx_ + 1, nx_ + 1);
+    r(Slice(0, nx_), nx_) = v;
+    return r;
   }
 
-  SX EuclideanManifold::minus_sx(const SX& y, const SX& x) const {
-    return y - x;
+  SX EuclideanManifold::vee_sx(const SX& V) const {
+    return V(Slice(0, nx_), nx_);
   }
+
+  SX EuclideanManifold::as_matrix_sx(const SX& a) const {
+    SX r = SX::eye(nx_ + 1);
+    r(Slice(0, nx_), nx_) = a;
+    return r;
+  }
+
+  SX EuclideanManifold::Adj_sx(const SX& a) const { return SX::eye(nx_);}
+  SX EuclideanManifold::Jr_sx(const SX& v) const { return SX::eye(nx_);}
+  SX EuclideanManifold::Jl_sx(const SX& v) const { return SX::eye(nx_);}
+  SX EuclideanManifold::Jr_inv_sx(const SX& v) const { return SX::eye(nx_);}
+  SX EuclideanManifold::Jl_inv_sx(const SX& v) const { return SX::eye(nx_);}
 
   // ---------------------------------------------------------------------------
   // ProductManifold
@@ -162,6 +329,9 @@ namespace casadi {
       casadi_int r = 0;
       for (auto& m : c) r += m.ndx();
       return r;
+    }
+    SX vertcat_or_empty(const std::vector<SX>& v) {
+      return v.empty() ? SX(0, 1) : vertcat(v);
     }
   } // namespace
 
@@ -187,6 +357,11 @@ namespace casadi {
 
   bool ProductManifold::is_euclidean() const {
     for (auto& m : comp_) if (!m.is_euclidean()) return false;
+    return true;
+  }
+
+  bool ProductManifold::is_lie_group() const {
+    for (auto& m : comp_) if (!m.is_lie_group()) return false;
     return true;
   }
 
@@ -218,6 +393,16 @@ namespace casadi {
     return r.empty() ? DM::zeros(0, 1) : vertcat(r);
   }
 
+  std::vector<casadi_int> ProductManifold::point_offsets() const {
+    std::vector<casadi_int> r = {0};
+    for (auto& m : comp_) r.push_back(r.back() + m->point_dim());
+    return r;
+  }
+
+  casadi_int ProductManifold::point_dim() const {
+    return point_offsets().back();
+  }
+
   SX ProductManifold::retract_sx(const SX& x, const SX& dx) const {
     if (comp_.empty()) return SX(0, 1);
     std::vector<SX> xs = vertsplit(x, off_), dxs = vertsplit(dx, off_tan_), r;
@@ -245,7 +430,62 @@ namespace casadi {
       std::vector<SX> xs = vertsplit(x, off_);
       for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->constraint_sx(xs[i]));
     }
-    return r.empty() ? SX(0, 1) : vertcat(r);
+    return vertcat_or_empty(r);
   }
+
+  SX ProductManifold::compose_sx(const SX& a, const SX& b) const {
+    if (comp_.empty()) return SX(0, 1);
+    std::vector<SX> as = vertsplit(a, off_), bs = vertsplit(b, off_), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->compose_sx(as[i], bs[i]));
+    return vertcat(r);
+  }
+
+  SX ProductManifold::inverse_sx(const SX& a) const {
+    if (comp_.empty()) return SX(0, 1);
+    std::vector<SX> as = vertsplit(a, off_), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->inverse_sx(as[i]));
+    return vertcat(r);
+  }
+
+  SX ProductManifold::exp_sx(const SX& v) const {
+    if (comp_.empty()) return SX(0, 1);
+    std::vector<SX> vs = vertsplit(v, off_tan_), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->exp_sx(vs[i]));
+    return vertcat(r);
+  }
+
+  SX ProductManifold::log_sx(const SX& a) const {
+    if (comp_.empty()) return SX(0, 1);
+    std::vector<SX> as = vertsplit(a, off_), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->log_sx(as[i]));
+    return vertcat(r);
+  }
+
+  SX ProductManifold::act_sx(const SX& a, const SX& p) const {
+    if (comp_.empty()) return SX(0, 1);
+    std::vector<SX> as = vertsplit(a, off_), ps = vertsplit(p, point_offsets()), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->act_sx(as[i], ps[i]));
+    return vertcat(r);
+  }
+
+  SX ProductManifold::Adj_sx(const SX& a) const {
+    if (comp_.empty()) return SX(0, 0);
+    std::vector<SX> as = vertsplit(a, off_), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->Adj_sx(as[i]));
+    return diagcat(r);
+  }
+
+#define CASADI_PRODUCT_TANGENT_BLOCKDIAG(NAME) \
+  SX ProductManifold::NAME(const SX& v) const { \
+    if (comp_.empty()) return SX(0, 0); \
+    std::vector<SX> vs = vertsplit(v, off_tan_), r; \
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->NAME(vs[i])); \
+    return diagcat(r); \
+  }
+  CASADI_PRODUCT_TANGENT_BLOCKDIAG(Jr_sx)
+  CASADI_PRODUCT_TANGENT_BLOCKDIAG(Jl_sx)
+  CASADI_PRODUCT_TANGENT_BLOCKDIAG(Jr_inv_sx)
+  CASADI_PRODUCT_TANGENT_BLOCKDIAG(Jl_inv_sx)
+#undef CASADI_PRODUCT_TANGENT_BLOCKDIAG
 
 } // namespace casadi

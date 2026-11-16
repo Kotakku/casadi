@@ -210,6 +210,7 @@ set(CASADI_INTERNAL
   jit_function.hpp        jit_function.cpp
   linsol.cpp              linsol_internal.hpp  linsol_internal.cpp
   manifold.cpp            manifold_internal.hpp  manifold_internal.cpp
+  manifold_lie.cpp
   rootfinder_impl.hpp     rootfinder.cpp
   integrator_impl.hpp     integrator.cpp
   runtime_integrator.hpp  runtime_integrator.cpp

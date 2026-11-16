@@ -135,7 +135,9 @@ class ManifoldTests(casadiTestCase):
   def test_get_function(self):
     M = ca.Manifold.Euclidean(2)
     self.assertEqual(list(ca.Manifold.function_names()),
-                     ["retract", "minus", "project", "constraint"])
+                     ["retract", "minus", "project", "constraint", "jac_retract_dx",
+                      "jac_minus_y", "compose", "inverse", "exp", "log", "act", "hat",
+                      "vee", "as_matrix", "Adj", "Jr", "Jl", "Jr_inv", "Jl_inv"])
     f = M.get_function("retract")
     self.assertTrue(isinstance(f, ca.Function))
     self.assertEqual(f.name_in(), ["x", "dx"])
@@ -144,6 +146,266 @@ class ManifoldTests(casadiTestCase):
     self.assertTrue(M.get_function("retract").__hash__() == f.__hash__())
     with self.assertRaises(Exception):
       M.get_function("no_such_function")
+
+
+try:
+  from scipy.linalg import expm as _expm
+except ImportError:
+  _expm = None
+
+
+def lie_groups():
+  # type: () -> list[ca.Manifold]
+  """Lie groups covered by the generic property tests"""
+  return [ca.Manifold.Euclidean(3),
+          ca.Manifold.SO3(),
+          ca.Manifold.product([ca.Manifold.Euclidean(2), ca.Manifold.SO3()])]
+
+
+def ad_jacobians(G):
+  # type: (ca.Manifold) -> ca.Function
+  """Reference Adj/Jr/Jl/Jr_inv/Jl_inv by algorithmic differentiation"""
+  a = ca.SX.sym("a", G.nx())
+  v = ca.SX.sym("v", G.ndx())
+  e = ca.SX.sym("e", G.ndx())
+  z = ca.DM.zeros(G.ndx(), 1)
+  Adj = ca.jacobian(G.log(G.compose(G.compose(a, G.exp(e)), G.inverse(a))), e)
+  Jr = ca.jacobian(G.log(G.compose(G.inverse(G.exp(v)), G.exp(v + e))), e)
+  Jl = ca.jacobian(G.log(G.compose(G.exp(v + e), G.inverse(G.exp(v)))), e)
+  Jr_inv = ca.jacobian(G.log(G.compose(G.exp(v), G.exp(e))), e)
+  Jl_inv = ca.jacobian(G.log(G.compose(G.exp(e), G.exp(v))), e)
+  out = [ca.substitute(J, e, z) for J in [Adj, Jr, Jl, Jr_inv, Jl_inv]]
+  return ca.Function("ref", [a, v], out)
+
+
+class LieGroupTests(casadiTestCase):
+
+  def random_tangent(self, G, scale=1.0):
+    # type: (ca.Manifold, float) -> ca.DM
+    return ca.DM(np.random.uniform(-scale, scale, (G.ndx(), 1)))
+
+  def random_element(self, G):
+    # type: (ca.Manifold) -> ca.DM
+    return G.exp(self.random_tangent(G))
+
+  def assert_same_element(self, G, a, b, digits=10):
+    # type: (ca.Manifold, ca.DM, ca.DM, int) -> None
+    """a and b represent the same group element"""
+    self.checkarray(G.minus(a, b), ca.DM.zeros(G.ndx(), 1), digits=digits)
+
+  def test_is_lie_group(self):
+    for G in lie_groups():
+      self.assertTrue(G.is_lie_group())
+
+  def test_axioms(self):
+    np.random.seed(0)
+    for G in lie_groups():
+      e = G.identity()
+      for _ in range(5):
+        a, b, c = [self.random_element(G) for _ in range(3)]
+        self.assert_same_element(G, G.compose(a, G.inverse(a)), e)
+        self.assert_same_element(G, G.compose(G.inverse(a), a), e)
+        self.assert_same_element(G, G.compose(a, e), a)
+        self.assert_same_element(G, G.compose(G.compose(a, b), c),
+                                 G.compose(a, G.compose(b, c)))
+        self.assert_same_element(G, G.exp(G.log(a)), a)
+        v = self.random_tangent(G)
+        self.checkarray(G.log(G.exp(v)), v)
+
+  def test_retract_minus(self):
+    np.random.seed(1)
+    for G in lie_groups():
+      for _ in range(5):
+        x, y = self.random_element(G), self.random_element(G)
+        dx = self.random_tangent(G)
+        self.assert_same_element(G, G.retract(x, ca.DM.zeros(G.ndx(), 1)), x)
+        self.checkarray(G.minus(x, x), ca.DM.zeros(G.ndx(), 1))
+        self.assert_same_element(G, G.retract(x, G.minus(y, x)), y)
+        self.checkarray(G.minus(G.retract(x, dx), x), dx)
+        # right perturbation convention
+        self.assert_same_element(G, G.retract(x, dx), G.compose(x, G.exp(dx)))
+
+  def test_jacobians_vs_ad(self):
+    np.random.seed(2)
+    for G in lie_groups():
+      ref = ad_jacobians(G)
+      for scale in [0.0, 1e-6, 0.1, 1.0, 1.8]:  # |v| < pi (no wrap-around)
+        a = self.random_element(G)
+        v = self.random_tangent(G, scale)
+        Adj, Jr, Jl, Jr_inv, Jl_inv = ref(a, v)
+        self.checkarray(G.Adj(a), Adj, str(G) + " Adj")
+        self.checkarray(G.Jr(v), Jr, str(G) + " Jr")
+        self.checkarray(G.Jl(v), Jl, str(G) + " Jl")
+        self.checkarray(G.Jr_inv(v), Jr_inv, str(G) + " Jr_inv")
+        self.checkarray(G.Jl_inv(v), Jl_inv, str(G) + " Jl_inv")
+        I = ca.DM.eye(G.ndx())
+        self.checkarray(ca.mtimes(G.Jr(v), G.Jr_inv(v)), I)
+        self.checkarray(ca.mtimes(G.Jl(v), G.Jl_inv(v)), I)
+        self.checkarray(G.Jl(v), G.Jr(-v))
+        self.checkarray(ca.mtimes(G.Adj(G.exp(v)), G.Jr(v)), G.Jl(v))
+
+  def test_adjoint(self):
+    np.random.seed(3)
+    for G in lie_groups():
+      a = self.random_element(G)
+      v = self.random_tangent(G)
+      self.assert_same_element(G, G.compose(a, G.exp(v)),
+                               G.compose(G.exp(ca.mtimes(G.Adj(a), v)), a))
+
+  def test_matrix_representation(self):
+    np.random.seed(4)
+    for G in lie_groups():
+      if G.n_components() > 1:
+        with self.assertRaises(Exception):
+          G.as_matrix(G.identity())
+        continue
+      a, b = self.random_element(G), self.random_element(G)
+      v = self.random_tangent(G)
+      self.checkarray(G.as_matrix(G.compose(a, b)),
+                      ca.mtimes(G.as_matrix(a), G.as_matrix(b)))
+      self.checkarray(G.as_matrix(G.inverse(a)), ca.inv(G.as_matrix(a)))
+      self.checkarray(G.vee(G.hat(v)), v)
+      if _expm is not None:
+        self.checkarray(G.as_matrix(G.exp(v)), ca.DM(_expm(np.array(G.hat(v)))))
+
+  def test_act(self):
+    np.random.seed(5)
+    for G in lie_groups():
+      a, b = self.random_element(G), self.random_element(G)
+      p = ca.DM(np.random.randn(G.get_function("act").size1_in(1), 1))
+      self.checkarray(G.act(G.compose(a, b), p), G.act(a, G.act(b, p)))
+      self.checkarray(G.act(G.identity(), p), p)
+
+  def test_finite_derivatives(self):
+    """Values, gradients and Hessians stay finite at singular points"""
+    for G in lie_groups():
+      v = ca.SX.sym("v", G.ndx())
+      a = ca.SX.sym("a", G.nx())
+      ops_v = [G.exp(v), ca.vec(G.Jr(v)), ca.vec(G.Jl(v)), ca.vec(G.Jr_inv(v)),
+               ca.vec(G.Jl_inv(v)), G.log(G.exp(v))]
+      ops_a = [G.log(a), G.minus(a, G.identity())]
+      w = ca.SX.sym("w", 1)
+      for ex, arg in [(e, v) for e in ops_v] + [(e, a) for e in ops_a]:
+        f = ca.Function("f", [arg],
+                        [ex, ca.jacobian(ex, arg), ca.hessian(ca.dot(ex, ex), arg)[0]])
+        for pt in self.singular_points(G, arg.numel() == G.nx()):
+          for r in f(pt):
+            self.assertTrue(np.all(np.isfinite(np.array(r))), str(G) + " at " + str(pt))
+
+  def singular_points(self, G, ambient):
+    # type: (ca.Manifold, bool) -> list[ca.DM]
+    pts = []  # type: list[ca.DM]
+    for th in [0.0, 1e-12, 1e-6, 0.1 - 1e-9, 0.1 + 1e-9, 0.2 - 1e-9, 0.2 + 1e-9, 1.0,
+               np.pi - 1e-6, np.pi]:
+      v = ca.DM.zeros(G.ndx(), 1)
+      v[G.ndx() - 1] = th
+      if G.ndx() > 1:
+        v[0] = th / 3
+      pts.append(G.exp(v) if ambient else v)
+    return pts
+
+  def test_series_continuity(self):
+    """No jump in value or derivatives where Taylor series take over"""
+    for G in lie_groups():
+      v = ca.SX.sym("v", G.ndx())
+      ex = ca.veccat(G.exp(v), G.Jr(v), G.Jr_inv(v), G.log(G.exp(v)))
+      f = ca.Function("f", [v], [ex, ca.jacobian(ex, v)])
+      for thr in [0.1, 0.2]:  # sqrt of the switching thresholds
+        d = ca.DM.zeros(G.ndx(), 1)
+        lo, hi = d, ca.DM(d)
+        lo[G.ndx() - 1] = thr * (1 - 1e-9)
+        hi[G.ndx() - 1] = thr * (1 + 1e-9)
+        for rl, rh in zip(f(lo), f(hi)):
+          self.checkarray(rl, rh, str(G), digits=7)
+
+  def test_symbolic_types(self):
+    np.random.seed(6)
+    for G in lie_groups():
+      a = self.random_element(G)
+      v = self.random_tangent(G)
+      for X in [ca.SX, ca.MX]:
+        sa = X.sym("a", G.nx())
+        sv = X.sym("v", G.ndx())
+        f = ca.Function("f", [sa, sv], [G.compose(sa, G.exp(sv)), G.log(sa), G.Jr(sv)])
+        r = f(a, v)
+        self.checkarray(r[0], G.compose(a, G.exp(v)))
+        self.checkarray(r[1], G.log(a))
+        self.checkarray(r[2], G.Jr(v))
+
+  def test_columnwise(self):
+    np.random.seed(7)
+    G = ca.Manifold.SO3()
+    V = ca.DM(np.random.randn(3, 4))
+    A = G.exp(V)
+    self.assertEqual(A.shape, (4, 4))
+    for k in range(4):
+      self.checkarray(A[:, k], G.exp(V[:, k]))
+    # matrix-valued results are stacked horizontally
+    J = G.Jr(V)
+    self.assertEqual(J.shape, (3, 12))
+    self.checkarray(J[:, 3:6], G.Jr(V[:, 1]))
+    # matrix-valued inputs likewise
+    self.checkarray(G.vee(G.hat(V)), V)
+
+
+class SO3Tests(casadiTestCase):
+
+  def test_conventions(self):
+    G = ca.Manifold.SO3()
+    self.assertEqual((G.nx(), G.ndx()), (4, 3))
+    self.assertEqual(str(G), "SO3")
+    self.checkarray(G.identity(), ca.DM([1, 0, 0, 0]))
+    self.assertFalse(any(G.euclidean_mask()))
+    # 90 degrees about z: q = [cos(pi/4), 0, 0, sin(pi/4)]
+    q = G.exp(ca.DM([0, 0, np.pi/2]))
+    self.checkarray(q, ca.DM([np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)]))
+    self.checkarray(G.act(q, ca.DM([1, 0, 0])), ca.DM([0, 1, 0]))
+    self.checkarray(G.as_matrix(q), ca.DM([[0, -1, 0], [1, 0, 0], [0, 0, 1]]))
+    self.checkarray(G.hat(ca.DM([1, 2, 3])), ca.DM([[0, -3, 2], [3, 0, -1], [-2, 1, 0]]))
+
+  def test_double_cover(self):
+    G = ca.Manifold.SO3()
+    v = ca.DM([0.3, -0.4, 0.5])
+    q = G.exp(v)
+    self.checkarray(G.log(-q), v)
+    self.checkarray(G.minus(-q, q), ca.DM.zeros(3, 1))
+
+  def test_log_scale_invariant(self):
+    G = ca.Manifold.SO3()
+    v = ca.DM([0.3, -0.4, 0.5])
+    self.checkarray(G.log(3.7*G.exp(v)), v)
+
+  def test_project_constraint(self):
+    G = ca.Manifold.SO3()
+    q = ca.DM([1, 2, 3, 4])
+    self.checkarray(G.project(q), q/ca.norm_2(q))
+    self.checkarray(G.constraint(q), ca.DM(29))
+    self.checkarray(G.constraint(G.project(q)), ca.DM(0))
+
+  def test_against_scipy(self):
+    try:
+      from scipy.spatial.transform import Rotation
+    except ImportError:
+      self.skipTest("scipy not available")
+    G = ca.Manifold.SO3()
+    np.random.seed(8)
+    for _ in range(5):
+      v = np.random.randn(3)
+      R = Rotation.from_rotvec(v)
+      self.checkarray(G.as_matrix(G.exp(ca.DM(v))), ca.DM(R.as_matrix()))
+      x, y, z, w = R.as_quat()
+      self.assert_quat_equal(G.exp(ca.DM(v)), ca.DM([w, x, y, z]))
+
+  def assert_quat_equal(self, a, b):
+    # type: (ca.DM, ca.DM) -> None
+    if float(a[0]) * float(b[0]) < 0:
+      b = -b
+    self.checkarray(a, b)
+
+  def test_not_lie(self):
+    # Lie operations of a product are available only if all components are groups
+    M = ca.Manifold.product([ca.Manifold.SO3(), ca.Manifold.Euclidean(1)])
+    self.assertTrue(M.is_lie_group())
 
 
 if __name__ == '__main__':
