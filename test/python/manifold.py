@@ -617,5 +617,68 @@ class ManifoldSerializationTests(casadiTestCase):
     self.assertTrue(ca.Manifold.deserialize(ca.Manifold().serialize()).is_null())
 
 
+class ManifoldJacobianTests(casadiTestCase):
+
+  def manifolds(self):
+    # type: () -> list[ca.Manifold]
+    retract, minus, project = sphere_functions()
+    S2 = ca.Manifold("S2", retract, minus, {"project": project})
+    return lie_groups() + [S2, ca.Manifold.product([S2, ca.Manifold.SO3()])]
+
+  def test_jac_retract_dx(self):
+    np.random.seed(11)
+    for M in self.manifolds():
+      x = M.project(ca.DM(np.random.randn(M.nx(), 1)))
+      dx = ca.SX.sym("dx", M.ndx())
+      ref = ca.Function("ref", [dx], [ca.jacobian(M.retract(x, dx), dx)])
+      J = M.jac_retract_dx(x)
+      self.assertEqual(J.shape, (M.nx(), M.ndx()))
+      self.checkarray(J, ref(ca.DM.zeros(M.ndx(), 1)), str(M))
+
+  def test_jac_minus_y(self):
+    np.random.seed(12)
+    for M in self.manifolds():
+      x = M.project(ca.DM(np.random.randn(M.nx(), 1)))
+      y = ca.SX.sym("y", M.nx())
+      ref = ca.Function("ref", [y], [ca.jacobian(M.minus(y, x), y)])
+      J = M.jac_minus_y(x)
+      self.assertEqual(J.shape, (M.ndx(), M.nx()))
+      self.checkarray(J, ref(x), str(M))
+      # minus(retract(x, dx), x) = dx  =>  jac_minus_y(x) jac_retract_dx(x) = I
+      self.checkarray(ca.mtimes(J, M.jac_retract_dx(x)), ca.DM.eye(M.ndx()), str(M))
+
+  def test_chain_rule(self):
+    """Tangent-space gradient of f(retract(x, dx)) at dx = 0 from the ambient gradient"""
+    np.random.seed(13)
+    G = ca.Manifold.SE3()
+    x = G.exp(ca.DM(np.random.randn(6, 1)))
+    xs = ca.SX.sym("x", 7)
+    f = ca.sumsqr(xs - ca.DM(np.arange(7)))
+    grad = ca.Function("g", [xs], [ca.gradient(f, xs)])(x)
+    dx = ca.SX.sym("dx", 6)
+    ft = ca.substitute(f, xs, G.retract(x, dx))
+    grad_t = ca.Function("gt", [dx], [ca.gradient(ft, dx)])(ca.DM.zeros(6, 1))
+    self.checkarray(ca.mtimes(G.jac_retract_dx(x).T, grad), grad_t)
+
+  def test_columnwise_jacobian(self):
+    G = ca.Manifold.SO3()
+    X = G.exp(ca.DM(np.random.randn(3, 3)))
+    J = G.jac_retract_dx(X)
+    self.assertEqual(J.shape, (4, 9))
+    self.checkarray(J[:, 3:6], G.jac_retract_dx(X[:, 1]))
+
+
+class ManifoldCodegenTests(casadiTestCase):
+
+  def test_codegen(self):
+    np.random.seed(14)
+    for G in [ca.Manifold.SO3(), ca.Manifold.SE3()]:
+      a = G.exp(ca.DM(np.random.randn(G.ndx(), 1)))
+      v = ca.DM(np.random.randn(G.ndx(), 1))
+      for name, args in [("retract", [a, v]), ("minus", [a, G.identity()]),
+                         ("log", [a]), ("Jr_inv", [v]), ("jac_retract_dx", [a])]:
+        self.check_codegen(G.get_function(name), inputs=args)
+
+
 if __name__ == '__main__':
     unittest.main()
