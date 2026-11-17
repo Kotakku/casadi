@@ -240,15 +240,22 @@ namespace casadi {
 
     /** \brief Cheap residual between two points, for equality constraints y = x
 
-        A smooth function of (y, x) of dimension ndx that agrees with minus(y, x)
-        to first order around y = x (its Jacobian with respect to y at y = x equals
-        jac_minus_y(x)) but avoids the logarithm: for the built-in Lie groups it is the
-        vector part of x^-1 * y in a chart without trigonometric functions, e.g.
-        2*vec(q_x^* q_y) for SO(3) and sin(theta_y - theta_x) for SO(2). It vanishes
-        exactly when y and x are the same element (for SO(3)/SE(3) also when the
-        quaternions differ only in sign). Away from y = x it differs from minus; use it
-        as a constraint residual (e.g. multiple shooting defects), not as a distance.
-        Equal to minus for Euclidean spaces and user-defined manifolds.
+        A function of (y, x) of dimension ndx that agrees with minus(y, x) to first
+        order around y = x (its Jacobian with respect to y at y = x equals
+        jac_minus_y(x)) but may avoid the logarithm. For SO(3) it is 2*vec(q_x^* q_y),
+        for SE(3) the translation of x^-1 * y together with 2*vec of its quaternion. It
+        vanishes exactly when y and x are the same element (also when the quaternions
+        differ only in sign).
+
+        Intended as an equality constraint residual (e.g. multiple shooting defects)
+        between nearby points, not as a distance: away from y = x it differs from minus,
+        and for SO(3)/SE(3) its Jacobian with respect to y becomes singular as the
+        relative rotation approaches pi (where minus is not differentiable either).
+
+        Equal to minus for Euclidean spaces, SO(2), SE(2) (a continuous scalar residual
+        on the circle cannot vanish only at y = x, e.g. sin(theta_y - theta_x) also
+        vanishes at a relative angle of pi), user-defined manifolds and products thereof
+        (componentwise).
 
         y: nx-by-K, x: nx-by-K, result: ndx-by-K
     */

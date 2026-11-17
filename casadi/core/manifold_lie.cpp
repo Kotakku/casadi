@@ -211,7 +211,6 @@ namespace casadi {
   SX SO2Manifold::inverse_sx(const SX& a) const { return vertcat(a(0), -a(1));}
   SX SO2Manifold::exp_sx(const SX& v) const { return vertcat(cos(v), sin(v));}
   SX SO2Manifold::log_sx(const SX& a) const { return atan2(a(1), a(0));}
-  SX SO2Manifold::log_approx_sx(const SX& a) const { return a(1);}
   SX SO2Manifold::act_sx(const SX& a, const SX& p) const { return mtimes(so2_rot(a), p);}
   SX SO2Manifold::hat_sx(const SX& v) const { return so2_hat(v);}
   SX SO2Manifold::vee_sx(const SX& V) const { return V(1, 0);}
@@ -255,10 +254,6 @@ namespace casadi {
     // V(theta) = [A -B; B A], A = sin(th)/th, B = (1-cos(th))/th
     SX A = sinc(t2), B = th*cosc(t2);
     return vertcat(std::vector<SX>{A*v(0) - B*v(1), B*v(0) + A*v(1), cos(th), sin(th)});
-  }
-
-  SX SE2Manifold::log_approx_sx(const SX& a) const {
-    return vertcat(a(Slice(0, 2)), a(3));
   }
 
   SX SE2Manifold::log_sx(const SX& a) const {

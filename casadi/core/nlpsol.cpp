@@ -553,15 +553,26 @@ namespace casadi {
        {OT_FUNCTION,
         "Function (x, p, lam_f, lam_g) -> (hess) or (hess, grad) returning the Hessian of "
         "the Lagrangian lam_f*f + lam_g'*g with respect to x (nx-by-nx; symmetric, or its "
-        "lower triangular part) and optionally its gradient (nx-by-1). Used instead of automatic differentiation of the NLP wherever "
-        "the solver needs this Hessian (also for x_manifold, where it enters the chain "
-        "rule). Useful to exploit structure that is not visible to automatic "
-        "differentiation, e.g. stage-wise Hessian blocks of an optimal control problem."}},
+        "lower triangular part) and optionally its gradient (nx-by-1). Used instead of "
+        "automatic differentiation of the NLP wherever the solver needs this Hessian, for "
+        "any plugin. With x_manifold, both are taken with respect to the ambient x and "
+        "enter the chain rule to the local coordinates (the gradient is needed for the "
+        "curvature of the retraction; it is computed by automatic differentiation if not "
+        "provided). The values are not checked. The sparsity pattern is used as the "
+        "Hessian sparsity, so it must contain all structural nonzeros (and preferably no "
+        "more). Useful to exploit structure that is not visible to automatic "
+        "differentiation, e.g. stage-wise Hessian blocks of an optimal control problem. "
+        "Unlike the plugin-specific options hess_lag (ipopt, bonmin, feasiblesqpmethod), "
+        "which replace an internal function with a plugin-specific signature, this option "
+        "has a fixed signature for all plugins."}},
       {"custom_jac_g",
        {OT_FUNCTION,
         "Function (x, p) -> (jac) returning the Jacobian of g with respect to x "
-        "(ng-by-nx). Used instead of automatic differentiation of the NLP wherever the "
-        "solver needs this Jacobian (cf. custom_hess_lag)."}}
+        "(ng-by-nx), used instead of automatic differentiation of the NLP wherever the "
+        "solver needs this Jacobian (cf. custom_hess_lag). The values are not checked. The "
+        "sparsity pattern is used as the Jacobian sparsity, including for structure "
+        "detection (e.g. the stage structure for fatrop), so it must contain all "
+        "structural nonzeros and preferably no more."}}
      }
   };
 
@@ -1738,7 +1749,11 @@ namespace casadi {
       {"x", oracle.sparsity_in(NL_X)}, {"p", oracle.sparsity_in(NL_P)},
       {"lam:f", Sparsity::scalar()}, {"lam:g", oracle.sparsity_out(NL_G)}};
     for (const std::string& n : s_in) {
-      if (sp_in.find(n)==sp_in.end()) return oracle.factory(fname, s_in, s_out, aux, opts);
+      if (sp_in.find(n)==sp_in.end()) {
+        if (verbose_) casadi_message(fname + ": non-standard input '" + n
+                                     + "', custom derivatives not used");
+        return oracle.factory(fname, s_in, s_out, aux, opts);
+      }
     }
     auto has_in = [&](const std::string& n) {
       return std::find(s_in.begin(), s_in.end(), n) != s_in.end();
@@ -1752,9 +1767,8 @@ namespace casadi {
     bool can_grad = can_hess && custom_hess_lag_.n_out()==2;
     bool can_jac = !custom_jac_g_.is_null() && has_in("x") && has_in("p");
     // Outputs supplied by the custom functions, the rest by the factory
-    std::vector<std::string> ad_out;
+    std::vector<std::string> ad_out, custom_out;
     std::vector<casadi_int> ad_ind(s_out.size(), -1);
-    bool any_custom = false;
     for (casadi_int i=0; i<s_out.size(); ++i) {
       const std::string& n = s_out[i];
       bool custom = (can_hess && (n=="hess:gamma:x:x" || n=="triu:hess:gamma:x:x"
@@ -1762,13 +1776,17 @@ namespace casadi {
                     || (can_grad && n=="grad:gamma:x")
                     || (can_jac && n=="jac:g:x");
       if (custom) {
-        any_custom = true;
+        custom_out.push_back(n);
       } else {
         ad_ind[i] = ad_out.size();
         ad_out.push_back(n);
       }
     }
-    if (!any_custom) return oracle.factory(fname, s_in, s_out, aux, opts);
+    if (verbose_) {
+      casadi_message(fname + ": custom derivatives for " + str(custom_out)
+                     + ", automatic differentiation for " + str(ad_out));
+    }
+    if (custom_out.empty()) return oracle.factory(fname, s_in, s_out, aux, opts);
     std::vector<MX> arg;
     std::map<std::string, MX> arg_map;
     for (const std::string& n : s_in) {

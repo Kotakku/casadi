@@ -671,6 +671,15 @@ class ManifoldJacobianTests(casadiTestCase):
     SO3 = ca.Manifold.SO3()
     q = SO3.exp(ca.DM([0.3, -0.2, 0.5]))
     self.checkarray(SO3.defect(-q, q), ca.DM.zeros(3, 1))
+    # no spurious zeros at a relative rotation of pi
+    SO2 = ca.Manifold.SO2()
+    self.assertTrue(float(ca.norm_inf(SO2.defect(ca.DM([-1, 0]), ca.DM([1, 0])))) > 3)
+    SE2 = ca.Manifold.SE2()
+    self.assertTrue(float(ca.norm_inf(SE2.defect(ca.DM([0, 0, -1, 0]),
+                                                 ca.DM([0, 0, 1, 0])))) > 3)
+    for G in [SO3, ca.Manifold.SE3()]:
+      a = G.exp(ca.DM([0]*(G.ndx()-3) + [np.pi, 0, 0]))
+      self.assertTrue(float(ca.norm_inf(G.defect(a, G.identity()))) > 1, str(G))
 
   def test_chain_rule(self):
     """Tangent-space gradient of f(retract(x, dx)) at dx = 0 from the ambient gradient"""

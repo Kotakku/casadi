@@ -699,6 +699,31 @@ class CustomDerivativeTests(casadiTestCase):
                                         - ref.get_function("nlp_hess_l")(x, [], 0.7, lam_g)[hess_out]))
                       > 1e-3, solver)
 
+  def test_external(self):
+    """Custom derivatives that cannot be expanded (external) with an SX oracle"""
+    import shutil
+    import subprocess
+    if shutil.which("gcc") is None:
+      self.skipTest("gcc not available")
+    nlp, M, args = attitude_ocp(N=4)
+    H, J = lagrangian_derivatives(nlp, grad=True)
+    d = tempfile.mkdtemp()
+    ext = []
+    for f in [H, J]:
+      c = os.path.join(d, f.name() + ".c")
+      so = os.path.join(d, f.name() + ".so")
+      f.generate(f.name() + ".c", {"with_header": False})
+      shutil.move(f.name() + ".c", c)
+      subprocess.check_call(["gcc", "-O1", "-fPIC", "-shared", c, "-o", so])
+      ext.append(ca.external(f.name(), so))
+    opts = dict(SQP_OPTS, x_manifold=M)
+    r = ca.nlpsol("S", "sqpmethod", nlp, opts)(**args)
+    S = ca.nlpsol("S", "sqpmethod", nlp, dict(opts, custom_hess_lag=ext[0],
+                                               custom_jac_g=ext[1]))
+    rc = S(**args)
+    self.assertTrue(S.stats()["success"])
+    self.checkarray(rc["x"], r["x"], digits=8)
+
   def test_errors(self):
     x = ca.SX.sym("x", 2)
     nlp = {"x": x, "f": ca.sumsqr(x), "g": x[0]*x[1]}

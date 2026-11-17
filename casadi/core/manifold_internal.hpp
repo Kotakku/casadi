@@ -165,7 +165,8 @@ namespace casadi {
     SX retract_sx(const SX& x, const SX& dx) const override;
     SX minus_sx(const SX& y, const SX& x) const override;
     SX defect_sx(const SX& y, const SX& x) const override;
-    /// Cheap chart around the identity with the same first-order behavior as log
+    /** Cheap chart around the identity with the same first-order behavior as log; it
+        must vanish only at the identity (default: log) */
     virtual SX log_approx_sx(const SX& a) const { return log_sx(a);}
   };
 
@@ -240,7 +241,6 @@ namespace casadi {
     SX inverse_sx(const SX& a) const override;
     SX exp_sx(const SX& v) const override;
     SX log_sx(const SX& a) const override;
-    SX log_approx_sx(const SX& a) const override;
     SX act_sx(const SX& a, const SX& p) const override;
     SX hat_sx(const SX& v) const override;
     SX vee_sx(const SX& V) const override;
@@ -267,7 +267,6 @@ namespace casadi {
     SX inverse_sx(const SX& a) const override;
     SX exp_sx(const SX& v) const override;
     SX log_sx(const SX& a) const override;
-    SX log_approx_sx(const SX& a) const override;
     SX act_sx(const SX& a, const SX& p) const override;
     SX hat_sx(const SX& v) const override;
     SX vee_sx(const SX& V) const override;
