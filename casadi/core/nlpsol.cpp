@@ -549,6 +549,13 @@ namespace casadi {
       {"manifold_n_embed",
        {OT_INT,
         "For internal use only."}},
+      {"manifold_chain_rule",
+       {OT_STRING,
+        "How the derivatives in the local coordinates of x_manifold are assembled from the "
+        "ambient ones: 'sx' (straight-line code per nonzero: fastest, but the code size "
+        "grows with the number of nonzeros of the Hessian / Jacobian), 'mx' (sparse "
+        "matrix operations: compact code for large NLPs) or 'auto' (default: 'mx' if the "
+        "ambient Hessian or Jacobian has more than 20000 nonzeros)."}},
       {"custom_hess_lag",
        {OT_FUNCTION,
         "Function (x, p, lam_f, lam_g) -> (hess) or (hess, grad) returning the Hessian of "
@@ -597,6 +604,8 @@ namespace casadi {
         manifold_fallback_ = op.second.to_string();
       } else if (op.first=="manifold_n_embed") {
         manifold_n_embed_ = op.second;
+      } else if (op.first=="manifold_chain_rule") {
+        manifold_chain_rule_ = op.second.to_string();
       } else if (op.first=="custom_hess_lag") {
         custom_hess_lag_ = op.second;
       } else if (op.first=="custom_jac_g") {
@@ -746,6 +755,10 @@ namespace casadi {
         + " Jacobian, got " + j.sparsity_out(0).dim() + ".");
     }
 
+    casadi_assert(manifold_chain_rule_=="auto" || manifold_chain_rule_=="sx"
+                  || manifold_chain_rule_=="mx",
+      "Option 'manifold_chain_rule' must be 'auto', 'sx' or 'mx', got '"
+      + manifold_chain_rule_ + "'.");
     casadi_assert(manifold_fallback_=="error" || manifold_fallback_=="embed",
       "Option 'manifold_fallback' must be 'error' or 'embed', got '" + manifold_fallback_ + "'.");
     if (!x_manifold_.is_null()) {
@@ -1928,14 +1941,30 @@ namespace casadi {
       return arg.at(it - s_in.begin());
     };
     MX x = input("x");
-    // The chain rule is applied by small SX functions of (x, ambient derivative):
-    // T = [I on (e_amb, e_tan); T_N on (n_amb, n_tan)], so the Euclidean part is a
-    // selection of nonzeros (free in SX) and only T_N enters products
+    // The chain rule uses T = [I on (e_amb, e_tan); T_N on (n_amb, n_tan)]: the Euclidean
+    // part is a selection of nonzeros and only T_N enters products.
+    // - sx: small SX functions of (x, ambient derivative); straight-line code per nonzero,
+    //   fastest for small and medium NLPs
+    // - mx: sparse MX operations (gathers and sparse products); the code size does not grow
+    //   with the number of nonzeros, for large NLPs
     const std::vector<casadi_int>& ea = manifold_e_amb_;
     const std::vector<casadi_int>& na = manifold_n_amb_;
     const std::vector<casadi_int>& pos = manifold_tan_pos_;
+    bool use_mx = manifold_chain_rule_=="mx";
+    if (manifold_chain_rule_=="auto") {
+      for (casadi_int i=0; i<s_out.size(); ++i) {
+        if ((s_out[i]=="jac:g:d" || s_out[i]=="hess:gamma:d:d") && res[i].nnz()>20000) {
+          use_mx = true;
+        }
+      }
+    }
+    if (verbose_) {
+      casadi_message(fname + ": chain rule to the local coordinates with "
+                     + std::string(use_mx ? "MX" : "SX") + " operations");
+    }
     SX xs = SX::sym("x", nx_);
     SX TN = manifold_TN_(std::vector<SX>{xs}).at(0);
+    MX TN_mx = use_mx ? manifold_TN_(std::vector<MX>{x}).at(0) : MX();
     Dict sx_opts = {{"cse", true}};
     std::vector<MX> out;
     for (casadi_int i=0; i<s_out.size(); ++i) {
@@ -1944,40 +1973,66 @@ namespace casadi {
         out.push_back(res[i]);
       } else if (n=="grad:f:d" || n=="grad:gamma:d") {
         // T' grad; gradients are dense vectors, as returned by the factory for x
-        SX gr = SX::sym("grad", nx_);
-        SX q = vertcat(gr(ea), mtimes(TN.T(), gr(na)));
-        Function cr(fname + "_chain_grad", {xs, gr}, {densify(q(pos))}, sx_opts);
-        out.push_back(cr(std::vector<MX>{x, densify(res[i])}).at(0));
+        if (use_mx) {
+          MX gr = densify(res[i]);
+          MX q = vertcat(gr(ea), mtimes(TN_mx.T(), gr(na)));
+          out.push_back(densify(q(pos)));
+        } else {
+          SX gr = SX::sym("grad", nx_);
+          SX q = vertcat(gr(ea), mtimes(TN.T(), gr(na)));
+          Function cr(fname + "_chain_grad", {xs, gr}, {densify(q(pos))}, sx_opts);
+          out.push_back(cr(std::vector<MX>{x, densify(res[i])}).at(0));
+        }
       } else if (n=="jac:g:d") {
         // jac T
-        SX J = SX::sym("jac", res[i].sparsity());
-        std::vector<casadi_int> all_rows = range(J.size1());
-        SX q = horzcat(J(all_rows, ea), mtimes(J(all_rows, na), TN));
-        Function cr(fname + "_chain_jac", {xs, J}, {q(all_rows, pos)}, sx_opts);
-        out.push_back(cr(std::vector<MX>{x, res[i]}).at(0));
+        std::vector<casadi_int> all_rows = range(res[i].size1());
+        if (use_mx) {
+          const MX& J = res[i];
+          MX q = horzcat(J(all_rows, ea), mtimes(J(all_rows, na), TN_mx));
+          out.push_back(q(all_rows, pos));
+        } else {
+          SX J = SX::sym("jac", res[i].sparsity());
+          SX q = horzcat(J(all_rows, ea), mtimes(J(all_rows, na), TN));
+          Function cr(fname + "_chain_jac", {xs, J}, {q(all_rows, pos)}, sx_opts);
+          out.push_back(cr(std::vector<MX>{x, res[i]}).at(0));
+        }
       } else {  // hess:gamma:d:d
         // T' H T + C(x, grad gamma) (+ lam:f I on the padding)
-        SX Hx = SX::sym("hess", res[i].sparsity());
-        SX gr = SX::sym("grad", nx_);
-        SX lf = SX::sym("lam_f");
-        SX H_en = mtimes(Hx(ea, na), TN);
-        SX q = blockcat(Hx(ea, ea), H_en, H_en.T(), mtimes(TN.T(), mtimes(Hx(na, na), TN)));
-        SX H = q(pos, pos) + manifold_C_(std::vector<SX>{xs, gr}).at(0);
+        MX lam_f = std::find(s_in.begin(), s_in.end(), "lam:f")!=s_in.end()
+          ? input("lam:f") : MX(1);
+        DM I_pad;
         if (!manifold_pad_idx_.empty()) {
           // 0.5*|d_pad|^2 in f, scaled by lam:f
           std::vector<double> e(manifold_pad_idx_.size(), 1.);
-          DM I_pad = DM::triplet(manifold_pad_idx_, manifold_pad_idx_, e,
-                                 manifold_nd_, manifold_nd_);
-          H += lf*SX(I_pad);
+          I_pad = DM::triplet(manifold_pad_idx_, manifold_pad_idx_, e,
+                              manifold_nd_, manifold_nd_);
         }
-        Function cr(fname + "_chain_hess", {xs, Hx, gr, lf}, {H}, sx_opts);
-        MX lam_f = std::find(s_in.begin(), s_in.end(), "lam:f")!=s_in.end()
-          ? input("lam:f") : MX(1);
-        out.push_back(cr(std::vector<MX>{x, res[i], densify(res.at(i_grad_gamma)), lam_f}).at(0));
+        if (use_mx) {
+          const MX& Hx = res[i];
+          MX gr = densify(res.at(i_grad_gamma));
+          MX H_en = mtimes(Hx(ea, na), TN_mx);
+          MX q = blockcat(Hx(ea, ea), H_en, H_en.T(),
+                          mtimes(TN_mx.T(), mtimes(Hx(na, na), TN_mx)));
+          MX H = q(pos, pos) + manifold_C_(std::vector<MX>{x, gr}).at(0);
+          if (!manifold_pad_idx_.empty()) H += lam_f*MX(I_pad);
+          out.push_back(H);
+        } else {
+          SX Hx = SX::sym("hess", res[i].sparsity());
+          SX gr = SX::sym("grad", nx_);
+          SX lf = SX::sym("lam_f");
+          SX H_en = mtimes(Hx(ea, na), TN);
+          SX q = blockcat(Hx(ea, ea), H_en, H_en.T(), mtimes(TN.T(), mtimes(Hx(na, na), TN)));
+          SX H = q(pos, pos) + manifold_C_(std::vector<SX>{xs, gr}).at(0);
+          if (!manifold_pad_idx_.empty()) H += lf*SX(I_pad);
+          Function cr(fname + "_chain_hess", {xs, Hx, gr, lf}, {H}, sx_opts);
+          out.push_back(cr(std::vector<MX>{x, res[i], densify(res.at(i_grad_gamma)),
+                                           lam_f}).at(0));
+        }
       }
     }
     Function ret(fname, arg, out, s_in, s_out);
-    if (oracle_.is_a("SXFunction")) ret = ret.expand();
+    // Expanding would turn the sparse MX operations into straight-line code again
+    if (oracle_.is_a("SXFunction") && !use_mx) ret = ret.expand();
     set_function(ret, fname, true);
   }
 

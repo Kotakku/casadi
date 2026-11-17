@@ -621,6 +621,34 @@ def lagrangian_derivatives(nlp, lower=False, scale=1, grad=False):
           ca.Function("my_jac", [x, p], [scale*ca.jacobian(g, x)]))
 
 
+class ChainRuleTests(casadiTestCase):
+  """Option manifold_chain_rule: SX and MX assembly give the same derivatives"""
+
+  def test_sx_mx(self):
+    nlp, M, args = attitude_ocp(N=6)
+    x = M.retract(args["x0"], ca.DM.rand(M.ndx()))
+    lam_g = ca.DM.rand(nlp["g"].shape[0])
+    solvers = [("sqpmethod", dict(SQP_OPTS, x_manifold=M), "nlp_jac_fg")]
+    if ca.has_nlpsol("fatrop"):
+      solvers.append(("fatrop", dict(FATROP_OPTS, x_manifold=M, structure_detection="auto",
+                                     equality=[True]*nlp["g"].shape[0]), "nlp_jac_g"))
+    for solver, opts, jac_name in solvers:
+      S = {c: ca.nlpsol("S", solver, nlp, dict(opts, manifold_chain_rule=c))
+           for c in ["sx", "mx", "auto"]}
+      for name, a in [("nlp_hess_l", [x, [], 0.7, lam_g]), (jac_name, [x, []])]:
+        ref = S["sx"].get_function(name)(*a)
+        for c in ["mx", "auto"]:
+          r = S[c].get_function(name)(*a)
+          r, rr = (r, ref) if isinstance(r, (list, tuple)) else ([r], [ref])
+          for o, o_ref in zip(r, rr):
+            self.checkarray(ca.densify(o), ca.densify(o_ref), solver + " " + name + " " + c,
+                            digits=12)
+      sol = {c: S[c](**args) for c in ["sx", "mx"]}
+      self.checkarray(sol["mx"]["x"], sol["sx"]["x"], solver, digits=8)
+    with self.assertInException("manifold_chain_rule"):
+      ca.nlpsol("S", "sqpmethod", nlp, dict(SQP_OPTS, x_manifold=M, manifold_chain_rule="xx"))
+
+
 class CustomDerivativeTests(casadiTestCase):
   """Options custom_hess_lag and custom_jac_g (any solver, with and without x_manifold)"""
 

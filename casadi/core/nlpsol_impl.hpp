@@ -102,6 +102,8 @@ namespace casadi {
     Manifold x_manifold_;
     /// What to do if the plugin has no native manifold support
     std::string manifold_fallback_;
+    /// How the chain rule to the local coordinates is applied: "auto", "sx" or "mx"
+    std::string manifold_chain_rule_ = "auto";
     /// Number of embedding constraints appended to g by the "embed" fallback
     casadi_int manifold_n_embed_;
     /// Euclidean entries of x (simple bounds allowed)
