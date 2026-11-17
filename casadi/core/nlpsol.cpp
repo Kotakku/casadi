@@ -548,7 +548,38 @@ namespace casadi {
         "Manifold::constraint(x) == 0 to g; they are hidden from g and lam_g)."}},
       {"manifold_n_embed",
        {OT_INT,
-        "For internal use only."}}
+        "For internal use only."}},
+      {"manifold_chain_rule",
+       {OT_STRING,
+        "How the derivatives in the local coordinates of x_manifold are assembled from the "
+        "ambient ones: 'sx' (straight-line code per nonzero: fastest, but the code size "
+        "grows with the number of nonzeros of the Hessian / Jacobian), 'mx' (sparse "
+        "matrix operations: compact code for large NLPs) or 'auto' (default: 'mx' if the "
+        "ambient Hessian or Jacobian has more than 20000 nonzeros)."}},
+      {"custom_hess_lag",
+       {OT_FUNCTION,
+        "Function (x, p, lam_f, lam_g) -> (hess) or (hess, grad) returning the Hessian of "
+        "the Lagrangian lam_f*f + lam_g'*g with respect to x (nx-by-nx; symmetric, or its "
+        "lower triangular part) and optionally its gradient (nx-by-1). Used instead of "
+        "automatic differentiation of the NLP wherever the solver needs this Hessian, for "
+        "any plugin. With x_manifold, both are taken with respect to the ambient x and "
+        "enter the chain rule to the local coordinates (the gradient is needed for the "
+        "curvature of the retraction; it is computed by automatic differentiation if not "
+        "provided). The values are not checked. The sparsity pattern is used as the "
+        "Hessian sparsity, so it must contain all structural nonzeros (and preferably no "
+        "more). Useful to exploit structure that is not visible to automatic "
+        "differentiation, e.g. stage-wise Hessian blocks of an optimal control problem. "
+        "Unlike the plugin-specific options hess_lag (ipopt, bonmin, feasiblesqpmethod), "
+        "which replace an internal function with a plugin-specific signature, this option "
+        "has a fixed signature for all plugins."}},
+      {"custom_jac_g",
+       {OT_FUNCTION,
+        "Function (x, p) -> (jac) returning the Jacobian of g with respect to x "
+        "(ng-by-nx), used instead of automatic differentiation of the NLP wherever the "
+        "solver needs this Jacobian (cf. custom_hess_lag). The values are not checked. The "
+        "sparsity pattern is used as the Jacobian sparsity, including for structure "
+        "detection (e.g. the stage structure for fatrop), so it must contain all "
+        "structural nonzeros and preferably no more."}}
      }
   };
 
@@ -573,6 +604,12 @@ namespace casadi {
         manifold_fallback_ = op.second.to_string();
       } else if (op.first=="manifold_n_embed") {
         manifold_n_embed_ = op.second;
+      } else if (op.first=="manifold_chain_rule") {
+        manifold_chain_rule_ = op.second.to_string();
+      } else if (op.first=="custom_hess_lag") {
+        custom_hess_lag_ = op.second;
+      } else if (op.first=="custom_jac_g") {
+        custom_jac_g_ = op.second;
       }
     }
 
@@ -687,6 +724,41 @@ namespace casadi {
     }
 
     // Optimization on manifolds
+    // User-provided derivatives
+    if (!custom_hess_lag_.is_null() || !custom_jac_g_.is_null()) {
+      casadi_assert(manifold_n_embed_==0 && !detect_simple_bounds_is_simple_.size(),
+        "Options 'custom_hess_lag' and 'custom_jac_g' cannot be combined with options "
+        "that modify the NLP (manifold_fallback = 'embed', detect_simple_bounds).");
+    }
+    if (!custom_hess_lag_.is_null()) {
+      const Function& h = custom_hess_lag_;
+      casadi_assert(h.n_in()==4 && (h.n_out()==1 || h.n_out()==2),
+        "Option 'custom_hess_lag': expected a Function (x, p, lam_f, lam_g) -> (hess) or "
+        "(hess, grad), got " + str(h));
+      if (h.n_out()==2) {
+        casadi_assert(h.size1_out(1)==nx_ && h.size2_out(1)==1,
+          "Option 'custom_hess_lag': the gradient (second output) must be " + str(nx_)
+          + "-by-1, got " + h.sparsity_out(1).dim() + ".");
+      }
+      casadi_assert(h.size1_out(0)==nx_ && h.size2_out(0)==nx_,
+        "Option 'custom_hess_lag': expected a " + str(nx_) + "-by-" + str(nx_)
+        + " Hessian, got " + h.sparsity_out(0).dim() + ".");
+      casadi_assert(h.sparsity_out(0).is_symmetric() || h.sparsity_out(0).is_tril(),
+        "Option 'custom_hess_lag': the Hessian must be symmetric or lower triangular.");
+    }
+    if (!custom_jac_g_.is_null()) {
+      const Function& j = custom_jac_g_;
+      casadi_assert(j.n_in()==2 && j.n_out()==1,
+        "Option 'custom_jac_g': expected a Function (x, p) -> (jac), got " + str(j));
+      casadi_assert(j.size1_out(0)==ng_ && j.size2_out(0)==nx_,
+        "Option 'custom_jac_g': expected a " + str(ng_) + "-by-" + str(nx_)
+        + " Jacobian, got " + j.sparsity_out(0).dim() + ".");
+    }
+
+    casadi_assert(manifold_chain_rule_=="auto" || manifold_chain_rule_=="sx"
+                  || manifold_chain_rule_=="mx",
+      "Option 'manifold_chain_rule' must be 'auto', 'sx' or 'mx', got '"
+      + manifold_chain_rule_ + "'.");
     casadi_assert(manifold_fallback_=="error" || manifold_fallback_=="embed",
       "Option 'manifold_fallback' must be 'error' or 'embed', got '" + manifold_fallback_ + "'.");
     if (!x_manifold_.is_null()) {
@@ -1678,50 +1750,297 @@ namespace casadi {
     return leaves;
   }
 
-  template<typename X>
-  static Function nlpsol_manifold_local_oracle(const Function& oracle, const Manifold& M,
-      casadi_int nd, const std::vector<casadi_int>& tan_idx,
-      const std::vector<casadi_int>& pad_idx) {
-    X x = X::sym("x", oracle.sparsity_in(NL_X));
-    X p = X::sym("p", oracle.sparsity_in(NL_P));
-    X d = X::sym("d", nd);
-    X dt = tan_idx.empty() ? X(0, 1) : X(d(tan_idx));
-    std::vector<X> fg = oracle(std::vector<X>{reshape(M.retract(vec(x), dt), x.size()), p});
-    X f = fg.at(NL_F);
-    if (!pad_idx.empty()) f += 0.5*sumsqr(d(pad_idx));
-    return Function("nlp_local", {x, p, d}, {f, fg.at(NL_G)},
-                    {"x", "p", "d"}, {"f", "g"});
+  Function Nlpsol::oracle_factory(const Function& oracle, const std::string& fname,
+      const std::vector<std::string>& s_in,
+      const std::vector<std::string>& s_out,
+      const Function::AuxOut& aux, const Dict& opts) const {
+    if ((custom_hess_lag_.is_null() && custom_jac_g_.is_null()) || oracle.get()!=oracle_.get()) {
+      return oracle.factory(fname, s_in, s_out, aux, opts);
+    }
+    // Inputs: only the standard ones are supported
+    std::map<std::string, Sparsity> sp_in = {
+      {"x", oracle.sparsity_in(NL_X)}, {"p", oracle.sparsity_in(NL_P)},
+      {"lam:f", Sparsity::scalar()}, {"lam:g", oracle.sparsity_out(NL_G)}};
+    for (const std::string& n : s_in) {
+      if (sp_in.find(n)==sp_in.end()) {
+        if (verbose_) casadi_message(fname + ": non-standard input '" + n
+                                     + "', custom derivatives not used");
+        return oracle.factory(fname, s_in, s_out, aux, opts);
+      }
+    }
+    auto has_in = [&](const std::string& n) {
+      return std::find(s_in.begin(), s_in.end(), n) != s_in.end();
+    };
+    // Lagrangian: lam:f * f + lam:g' * g
+    auto it_gamma = aux.find("gamma");
+    bool gamma_is_lag = it_gamma!=aux.end()
+      && it_gamma->second==std::vector<std::string>{"f", "g"};
+    bool can_hess = !custom_hess_lag_.is_null() && gamma_is_lag
+      && has_in("x") && has_in("p") && has_in("lam:f") && has_in("lam:g");
+    bool can_grad = can_hess && custom_hess_lag_.n_out()==2;
+    bool can_jac = !custom_jac_g_.is_null() && has_in("x") && has_in("p");
+    // Outputs supplied by the custom functions, the rest by the factory
+    std::vector<std::string> ad_out, custom_out;
+    std::vector<casadi_int> ad_ind(s_out.size(), -1);
+    for (casadi_int i=0; i<s_out.size(); ++i) {
+      const std::string& n = s_out[i];
+      bool custom = (can_hess && (n=="hess:gamma:x:x" || n=="triu:hess:gamma:x:x"
+                                  || n=="tril:hess:gamma:x:x"))
+                    || (can_grad && n=="grad:gamma:x")
+                    || (can_jac && n=="jac:g:x");
+      if (custom) {
+        custom_out.push_back(n);
+      } else {
+        ad_ind[i] = ad_out.size();
+        ad_out.push_back(n);
+      }
+    }
+    if (verbose_) {
+      casadi_message(fname + ": custom derivatives for " + str(custom_out)
+                     + ", automatic differentiation for " + str(ad_out));
+    }
+    if (custom_out.empty()) return oracle.factory(fname, s_in, s_out, aux, opts);
+    std::vector<MX> arg;
+    std::map<std::string, MX> arg_map;
+    for (const std::string& n : s_in) {
+      arg.push_back(MX::sym(n, sp_in[n]));
+      arg_map[n] = arg.back();
+    }
+    std::vector<MX> ad_res;
+    if (!ad_out.empty()) {
+      Function ad = oracle.factory(fname + "_ad", s_in, ad_out, aux, opts);
+      ad_res = ad(arg);
+    }
+    std::vector<MX> res(s_out.size());
+    std::vector<MX> hess_res;  // one call of custom_hess_lag for the Hessian and gradient
+    auto hess_call = [&]() -> const std::vector<MX>& {
+      if (hess_res.empty()) {
+        hess_res = custom_hess_lag_(std::vector<MX>{arg_map["x"], arg_map["p"],
+                                                    arg_map["lam:f"], arg_map["lam:g"]});
+      }
+      return hess_res;
+    };
+    for (casadi_int i=0; i<s_out.size(); ++i) {
+      const std::string& n = s_out[i];
+      if (ad_ind[i]>=0) {
+        res[i] = ad_res[ad_ind[i]];
+      } else if (n=="jac:g:x") {
+        res[i] = custom_jac_g_(std::vector<MX>{arg_map["x"], arg_map["p"]}).at(0);
+      } else if (n=="grad:gamma:x") {
+        res[i] = densify(hess_call().at(1));
+      } else {
+        MX H = hess_call().at(0);
+        if (!H.sparsity().is_symmetric()) {
+          // lower triangular: complete the upper triangle
+          H = H + tril(H, false).T();
+        }
+        if (n=="triu:hess:gamma:x:x") {
+          H = triu(H);
+        } else if (n=="tril:hess:gamma:x:x") {
+          H = tril(H);
+        }
+        res[i] = H;
+      }
+    }
+    return Function(fname, arg, res, s_in, s_out);
   }
 
-  Function Nlpsol::manifold_local_oracle(casadi_int nd, const std::vector<casadi_int>& tan_idx,
-                                         const std::vector<casadi_int>& pad_idx) const {
-    return oracle_.is_a("SXFunction")
-      ? nlpsol_manifold_local_oracle<SX>(oracle_, x_manifold_, nd, tan_idx, pad_idx)
-      : nlpsol_manifold_local_oracle<MX>(oracle_, x_manifold_, nd, tan_idx, pad_idx);
+  void Nlpsol::manifold_set_local_coordinates(casadi_int nd,
+      const std::vector<casadi_int>& tan_idx, const std::vector<casadi_int>& pad_idx) {
+    manifold_nd_ = nd;
+    manifold_pad_idx_ = pad_idx;
+    SX x = SX::sym("x", nx_), w = SX::sym("w", nx_), d = SX::sym("d", nd);
+    SX dt = tan_idx.empty() ? SX(0, 1) : SX(d(tan_idx));
+    SX r = x_manifold_.retract(x, dt);
+    SX zero = SX::zeros(nd);
+    // T(x) = d retract(x, d) / d d at d = 0
+    SX T = substitute(SX::jacobian(r, d), d, zero);
+    manifold_T_ = Function("manifold_T", {x}, {T}, {"x"}, {"T"});
+    // Split into entries where T is a unit selection (Euclidean: the derivatives are just
+    // copied) and the rest (T_N, small), to apply the chain rule cheaply
+    const Sparsity& sp = T.sparsity();
+    std::vector<casadi_int> nnz_row(nx_, 0), nnz_col(nd, 0), col_of(nx_, -1);
+    std::vector<casadi_int> rr, cc;
+    sp.get_triplet(rr, cc);
+    for (casadi_int k=0; k<rr.size(); ++k) {
+      nnz_row[rr[k]]++;
+      nnz_col[cc[k]]++;
+    }
+    std::vector<bool> is_e_row(nx_, false), is_e_col(nd, false);
+    for (casadi_int k=0; k<rr.size(); ++k) {
+      if (nnz_row[rr[k]]==1 && nnz_col[cc[k]]==1 && T.nz(k).is_one()) {
+        is_e_row[rr[k]] = true;
+        is_e_col[cc[k]] = true;
+        col_of[rr[k]] = cc[k];
+      }
+    }
+    manifold_e_amb_.clear();
+    manifold_e_tan_.clear();
+    manifold_n_amb_.clear();
+    manifold_n_tan_.clear();
+    for (casadi_int i=0; i<nx_; ++i) {
+      if (is_e_row[i]) {
+        manifold_e_amb_.push_back(i);
+        manifold_e_tan_.push_back(col_of[i]);
+      } else {
+        manifold_n_amb_.push_back(i);
+      }
+    }
+    for (casadi_int j=0; j<nd; ++j) if (!is_e_col[j]) manifold_n_tan_.push_back(j);
+    // Position of each tangent index in [e_tan; n_tan]
+    manifold_tan_pos_.assign(nd, -1);
+    for (casadi_int k=0; k<manifold_e_tan_.size(); ++k) manifold_tan_pos_[manifold_e_tan_[k]] = k;
+    for (casadi_int k=0; k<manifold_n_tan_.size(); ++k) {
+      manifold_tan_pos_[manifold_n_tan_[k]] = manifold_e_tan_.size() + k;
+    }
+    SX TN = T(manifold_n_amb_, manifold_n_tan_);
+    manifold_TN_ = Function("manifold_TN", {x}, {TN}, {"x"}, {"TN"});
+    // C(x, w) = d^2 (w' retract(x, d)) / d d^2 at d = 0
+    SX C = substitute(SX::hessian(SX::dot(w, r), d), d, zero);
+    manifold_C_ = Function("manifold_C", {x, w}, {C}, {"x", "w"}, {"C"});
   }
 
-  void Nlpsol::manifold_create_function(const Function& local, const std::string& fname,
+  void Nlpsol::manifold_create_function(const std::string& fname,
                                         const std::vector<std::string>& s_in,
                                         const std::vector<std::string>& s_out,
                                         const Function::AuxOut& aux) {
-    std::vector<std::string> s_in_d = s_in;
-    s_in_d.push_back("d");
-    Function f = local.factory(fname + "_local", s_in_d, s_out, aux);
-    // Fix d = 0
-    std::vector<MX> arg = f.mx_in();
-    std::vector<MX> call_arg = arg;
-    call_arg.back() = MX::zeros(f.sparsity_in(f.n_in()-1));
-    arg.pop_back();
-    Function ret(fname, arg, f(call_arg), s_in, f.name_out());
-    if (local.is_a("SXFunction")) ret = ret.expand();
-    set_function(ret, fname);
+    casadi_assert(!manifold_T_.is_null(), "manifold_set_local_coordinates has not been called");
+    // Corresponding derivatives with respect to x
+    std::vector<std::string> amb_out;
+    casadi_int i_grad_gamma = -1;
+    for (const std::string& n : s_out) {
+      if (n=="f" || n=="g") {
+        amb_out.push_back(n);
+      } else if (n=="grad:f:d") {
+        amb_out.push_back("grad:f:x");
+      } else if (n=="jac:g:d") {
+        amb_out.push_back("jac:g:x");
+      } else if (n=="grad:gamma:d") {
+        i_grad_gamma = amb_out.size();
+        amb_out.push_back("grad:gamma:x");
+      } else if (n=="hess:gamma:d:d") {
+        amb_out.push_back("hess:gamma:x:x");
+      } else {
+        casadi_error("manifold_create_function: unsupported output '" + n + "'");
+      }
+    }
+    bool hess = std::find(s_out.begin(), s_out.end(), "hess:gamma:d:d") != s_out.end();
+    if (hess && i_grad_gamma<0) {
+      // The curvature of the retraction needs the gradient of the Lagrangian
+      i_grad_gamma = amb_out.size();
+      amb_out.push_back("grad:gamma:x");
+    }
+    Function amb = oracle_factory(oracle_, fname + "_ambient", s_in, amb_out, aux, Dict());
+
+    // Assemble with the chain rule
+    std::vector<MX> arg = amb.mx_in();
+    std::vector<MX> res = amb(arg);
+    auto input = [&](const std::string& n) -> MX {
+      auto it = std::find(s_in.begin(), s_in.end(), n);
+      casadi_assert(it!=s_in.end(), "manifold_create_function: missing input '" + n + "'");
+      return arg.at(it - s_in.begin());
+    };
+    MX x = input("x");
+    // The chain rule uses T = [I on (e_amb, e_tan); T_N on (n_amb, n_tan)]: the Euclidean
+    // part is a selection of nonzeros and only T_N enters products.
+    // - sx: small SX functions of (x, ambient derivative); straight-line code per nonzero,
+    //   fastest for small and medium NLPs
+    // - mx: sparse MX operations (gathers and sparse products); the code size does not grow
+    //   with the number of nonzeros, for large NLPs
+    const std::vector<casadi_int>& ea = manifold_e_amb_;
+    const std::vector<casadi_int>& na = manifold_n_amb_;
+    const std::vector<casadi_int>& pos = manifold_tan_pos_;
+    bool use_mx = manifold_chain_rule_=="mx";
+    if (manifold_chain_rule_=="auto") {
+      for (casadi_int i=0; i<s_out.size(); ++i) {
+        if ((s_out[i]=="jac:g:d" || s_out[i]=="hess:gamma:d:d") && res[i].nnz()>20000) {
+          use_mx = true;
+        }
+      }
+    }
+    if (verbose_) {
+      casadi_message(fname + ": chain rule to the local coordinates with "
+                     + std::string(use_mx ? "MX" : "SX") + " operations");
+    }
+    SX xs = SX::sym("x", nx_);
+    SX TN = manifold_TN_(std::vector<SX>{xs}).at(0);
+    MX TN_mx = use_mx ? manifold_TN_(std::vector<MX>{x}).at(0) : MX();
+    Dict sx_opts = {{"cse", true}};
+    std::vector<MX> out;
+    for (casadi_int i=0; i<s_out.size(); ++i) {
+      const std::string& n = s_out[i];
+      if (n=="f" || n=="g") {
+        out.push_back(res[i]);
+      } else if (n=="grad:f:d" || n=="grad:gamma:d") {
+        // T' grad; gradients are dense vectors, as returned by the factory for x
+        if (use_mx) {
+          MX gr = densify(res[i]);
+          MX q = vertcat(gr(ea), mtimes(TN_mx.T(), gr(na)));
+          out.push_back(densify(q(pos)));
+        } else {
+          SX gr = SX::sym("grad", nx_);
+          SX q = vertcat(gr(ea), mtimes(TN.T(), gr(na)));
+          Function cr(fname + "_chain_grad", {xs, gr}, {densify(q(pos))}, sx_opts);
+          out.push_back(cr(std::vector<MX>{x, densify(res[i])}).at(0));
+        }
+      } else if (n=="jac:g:d") {
+        // jac T
+        std::vector<casadi_int> all_rows = range(res[i].size1());
+        if (use_mx) {
+          const MX& J = res[i];
+          MX q = horzcat(J(all_rows, ea), mtimes(J(all_rows, na), TN_mx));
+          out.push_back(q(all_rows, pos));
+        } else {
+          SX J = SX::sym("jac", res[i].sparsity());
+          SX q = horzcat(J(all_rows, ea), mtimes(J(all_rows, na), TN));
+          Function cr(fname + "_chain_jac", {xs, J}, {q(all_rows, pos)}, sx_opts);
+          out.push_back(cr(std::vector<MX>{x, res[i]}).at(0));
+        }
+      } else {  // hess:gamma:d:d
+        // T' H T + C(x, grad gamma) (+ lam:f I on the padding)
+        MX lam_f = std::find(s_in.begin(), s_in.end(), "lam:f")!=s_in.end()
+          ? input("lam:f") : MX(1);
+        DM I_pad;
+        if (!manifold_pad_idx_.empty()) {
+          // 0.5*|d_pad|^2 in f, scaled by lam:f
+          std::vector<double> e(manifold_pad_idx_.size(), 1.);
+          I_pad = DM::triplet(manifold_pad_idx_, manifold_pad_idx_, e,
+                              manifold_nd_, manifold_nd_);
+        }
+        if (use_mx) {
+          const MX& Hx = res[i];
+          MX gr = densify(res.at(i_grad_gamma));
+          MX H_en = mtimes(Hx(ea, na), TN_mx);
+          MX q = blockcat(Hx(ea, ea), H_en, H_en.T(),
+                          mtimes(TN_mx.T(), mtimes(Hx(na, na), TN_mx)));
+          MX H = q(pos, pos) + manifold_C_(std::vector<MX>{x, gr}).at(0);
+          if (!manifold_pad_idx_.empty()) H += lam_f*MX(I_pad);
+          out.push_back(H);
+        } else {
+          SX Hx = SX::sym("hess", res[i].sparsity());
+          SX gr = SX::sym("grad", nx_);
+          SX lf = SX::sym("lam_f");
+          SX H_en = mtimes(Hx(ea, na), TN);
+          SX q = blockcat(Hx(ea, ea), H_en, H_en.T(), mtimes(TN.T(), mtimes(Hx(na, na), TN)));
+          SX H = q(pos, pos) + manifold_C_(std::vector<SX>{xs, gr}).at(0);
+          if (!manifold_pad_idx_.empty()) H += lf*SX(I_pad);
+          Function cr(fname + "_chain_hess", {xs, Hx, gr, lf}, {H}, sx_opts);
+          out.push_back(cr(std::vector<MX>{x, res[i], densify(res.at(i_grad_gamma)),
+                                           lam_f}).at(0));
+        }
+      }
+    }
+    Function ret(fname, arg, out, s_in, s_out);
+    // Expanding would turn the sparse MX operations into straight-line code again
+    if (oracle_.is_a("SXFunction") && !use_mx) ret = ret.expand();
+    set_function(ret, fname, true);
   }
 
   void Nlpsol::manifold_create_step(casadi_int nd, const std::vector<casadi_int>& tan_idx) {
     SX x = SX::sym("x", nx_), dx = SX::sym("dx", nd), t = SX::sym("t");
     SX dt = tan_idx.empty() ? SX(0, 1) : SX(dx(tan_idx));
     set_function(Function("nlp_step", {x, dx, t}, {x_manifold_.retract(x, t*dt)},
-                          {"x", "dx", "t"}, {"x_next"}), "nlp_step");
+                          {"x", "dx", "t"}, {"x_next"}), "nlp_step", true);
   }
 
   void Nlpsol::init_manifold() {

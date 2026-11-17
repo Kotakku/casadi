@@ -158,6 +158,7 @@ namespace casadi {
   SX SO3Manifold::inverse_sx(const SX& a) const { return quat_conj(a);}
   SX SO3Manifold::exp_sx(const SX& v) const { return so3_exp(v);}
   SX SO3Manifold::log_sx(const SX& a) const { return so3_log(a);}
+  SX SO3Manifold::log_approx_sx(const SX& a) const { return 2*a(Slice(1, 4));}
   SX SO3Manifold::act_sx(const SX& a, const SX& p) const { return mtimes(quat_to_rot(a), p);}
   SX SO3Manifold::hat_sx(const SX& v) const { return manifold_skew(v);}
   SX SO3Manifold::vee_sx(const SX& V) const {
@@ -318,6 +319,10 @@ namespace casadi {
     SX th = v(Slice(3, 6));
     // translation: V(theta) rho with V = J_l of SO(3)
     return vertcat(mtimes(so3_Jl(th), v(Slice(0, 3))), so3_exp(th));
+  }
+
+  SX SE3Manifold::log_approx_sx(const SX& a) const {
+    return vertcat(a(Slice(0, 3)), 2*a(Slice(4, 7)));
   }
 
   SX SE3Manifold::log_sx(const SX& a) const {

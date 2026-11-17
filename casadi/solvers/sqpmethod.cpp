@@ -842,10 +842,10 @@ void Sqpmethod::init_manifold_functions() {
   }
 
   // Local parametrization of the NLP and its derivatives with respect to d at d = 0
-  Function local = manifold_local_oracle(nx_, tan_idx, pad_idx);
-  manifold_create_function(local, "nlp_jac_fg", {"x", "p"}, {"f", "grad:f:d", "g", "jac:g:d"});
+  manifold_set_local_coordinates(nx_, tan_idx, pad_idx);
+  manifold_create_function("nlp_jac_fg", {"x", "p"}, {"f", "grad:f:d", "g", "jac:g:d"});
   if (exact_hessian_) {
-    manifold_create_function(local, "nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
+    manifold_create_function("nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
                              {"hess:gamma:d:d"}, {{"gamma", {"f", "g"}}});
   }
 

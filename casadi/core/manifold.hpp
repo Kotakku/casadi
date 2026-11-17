@@ -238,6 +238,31 @@ namespace casadi {
     SX minus(const SX& y, const SX& x) const;
     MX minus(const MX& y, const MX& x) const;
 
+    /** \brief Cheap residual between two points, for equality constraints y = x
+
+        A function of (y, x) of dimension ndx that agrees with minus(y, x) to first
+        order around y = x (its Jacobian with respect to y at y = x equals
+        jac_minus_y(x)) but may avoid the logarithm. For SO(3) it is 2*vec(q_x^* q_y),
+        for SE(3) the translation of x^-1 * y together with 2*vec of its quaternion. It
+        vanishes exactly when y and x are the same element (also when the quaternions
+        differ only in sign).
+
+        Intended as an equality constraint residual (e.g. multiple shooting defects)
+        between nearby points, not as a distance: away from y = x it differs from minus,
+        and for SO(3)/SE(3) its Jacobian with respect to y becomes singular as the
+        relative rotation approaches pi (where minus is not differentiable either).
+
+        Equal to minus for Euclidean spaces, SO(2), SE(2) (a continuous scalar residual
+        on the circle cannot vanish only at y = x, e.g. sin(theta_y - theta_x) also
+        vanishes at a relative angle of pi), user-defined manifolds and products thereof
+        (componentwise).
+
+        y: nx-by-K, x: nx-by-K, result: ndx-by-K
+    */
+    DM defect(const DM& y, const DM& x) const;
+    SX defect(const SX& y, const SX& x) const;
+    MX defect(const MX& y, const MX& x) const;
+
     /** \brief Projection of an ambient vector onto the manifold
 
         E.g. normalization of a quaternion. Identity for Euclidean spaces.

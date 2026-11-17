@@ -149,6 +149,15 @@ namespace casadi {
     // Replace MX oracle with SX oracle?
     void expand();
 
+    /** \brief Generate a derivative function of an oracle (default: oracle.factory)
+
+        Hook for derived classes that supply some outputs by other means, e.g. user-provided
+        derivative functions. */
+    virtual Function oracle_factory(const Function& oracle, const std::string& fname,
+      const std::vector<std::string>& s_in,
+      const std::vector<std::string>& s_out,
+      const Function::AuxOut& aux, const Dict& opts) const;
+
     /** Create an oracle function, using a different oracle function
      * Temporary addition to allow transition from one oracle formulation to another.
      */

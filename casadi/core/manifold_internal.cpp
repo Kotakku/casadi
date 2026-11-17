@@ -170,14 +170,14 @@ namespace casadi {
   }
 
   std::vector<std::string> ManifoldInternal::function_names() {
-    return {"retract", "minus", "project", "constraint", "jac_retract_dx", "jac_minus_y",
-            "compose", "inverse", "exp", "log", "act", "hat", "vee", "as_matrix",
+    return {"retract", "minus", "defect", "project", "constraint", "jac_retract_dx",
+            "jac_minus_y", "compose", "inverse", "exp", "log", "act", "hat", "vee", "as_matrix",
             "Adj", "Jr", "Jl", "Jr_inv", "Jl_inv"};
   }
 
   bool ManifoldInternal::is_lie_function(const std::string& fname) {
     std::vector<std::string> n = function_names();
-    return std::find(n.begin() + 6, n.end(), fname) != n.end();
+    return std::find(n.begin() + 7, n.end(), fname) != n.end();
   }
 
   Function ManifoldInternal::create_function(const std::string& fname) const {
@@ -191,6 +191,9 @@ namespace casadi {
     } else if (fname=="minus") {
       SX y = SX::sym("y", nx_);
       return Function(fn, {y, x}, {minus_sx(y, x)}, {"y", "x"}, {"dx"});
+    } else if (fname=="defect") {
+      SX y = SX::sym("y", nx_);
+      return Function(fn, {y, x}, {defect_sx(y, x)}, {"y", "x"}, {"r"});
     } else if (fname=="project") {
       return Function(fn, {x}, {project_sx(x)}, {"x"}, {"x_proj"});
     } else if (fname=="constraint") {
@@ -289,6 +292,10 @@ namespace casadi {
 
   SX LieGroupInternal::minus_sx(const SX& y, const SX& x) const {
     return log_sx(compose_sx(inverse_sx(x), y));
+  }
+
+  SX LieGroupInternal::defect_sx(const SX& y, const SX& x) const {
+    return log_approx_sx(compose_sx(inverse_sx(x), y));
   }
 
   // ---------------------------------------------------------------------------
@@ -616,6 +623,13 @@ namespace casadi {
     if (comp_.empty()) return SX(0, 1);
     std::vector<SX> ys = vertsplit(y, off_), xs = vertsplit(x, off_), r;
     for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->minus_sx(ys[i], xs[i]));
+    return vertcat(r);
+  }
+
+  SX ProductManifold::defect_sx(const SX& y, const SX& x) const {
+    if (comp_.empty()) return SX(0, 1);
+    std::vector<SX> ys = vertsplit(y, off_), xs = vertsplit(x, off_), r;
+    for (casadi_int i=0; i<comp_.size(); ++i) r.push_back(comp_[i]->defect_sx(ys[i], xs[i]));
     return vertcat(r);
   }
 
